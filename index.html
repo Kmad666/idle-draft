@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en" data-mode="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Idle Draft</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="view"></div>
+<div id="tags"></div>
+
+<header class="hud glass">
+  <div class="brand"><b>Idle Draft</b><small>v0.1 · Sheet NW-01</small></div>
+  <div class="money"><span class="lbl">Bits</span><b id="bits">0</b><small id="rate">+0 / s</small></div>
+  <div class="hud-btns">
+    <button class="btn" id="btnPulse" title="Pulse: doubles speed for 10 seconds">Pulse</button>
+    <button class="btn" id="btnGuide">Glossary</button>
+    <button class="btn" id="btnControls">Controls</button>
+    <button class="btn" id="btnSettings">Settings</button>
+  </div>
+</header>
+
+<section id="tutorial" class="glass card"></section>
+<aside id="panel" class="glass card" hidden></aside>
+<div id="modeBar" class="glass" hidden></div>
+<nav id="dock" class="glass" aria-label="Build"></nav>
+<div id="tooltip" hidden></div>
+<div id="toasts" aria-live="polite"></div>
+<div id="modal" hidden><div class="sheet glass card" role="dialog" aria-modal="true"><button class="x btn" id="modalClose" aria-label="Close">Close</button><div id="modalBody"></div></div></div>
+<div id="boot">Loading the drafting table…</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
