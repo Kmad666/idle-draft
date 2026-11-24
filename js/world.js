@@ -4,14 +4,74 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { N, HALF, PITCH, ROAD, BLOCK, RIVER_ROW, KERB, FLOOR, roadLine, blockRect, rng } from './city.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { N, HALF, PITCH, ROAD, BLOCK, RIVER_ROW, KERB, FLOOR, roadLine, blockRect, rng, NEON_COLOURS } from './city.js';
 
 const THEMES = {
   light: { void: 0xeef2f6, grid: 0xc8d1dc, grid2: 0xdde3ea, ink: 0x1c2c44, inkOp: 0.3, floor: 0x1c2c44, floorOp: 0.065, accent: 0xd4500f,
     road: 0xe4e9f0, kerb: 0xfbfcfe, park: 0xd7eee0, sun: 1.45, hemi: 0.55, exposure: 1.05, beacon: 0.6, env: 1 },
   dark: { void: 0x0e1a2b, grid: 0x2a4060, grid2: 0x1a2b43, ink: 0x0a1424, inkOp: 0.55, floor: 0xffc27a, floorOp: 0.75, accent: 0xff8d42,
     road: 0x22344c, kerb: 0x9fb0c4, park: 0x5d8a74, sun: 0.35, hemi: 0.3, exposure: 0.95, beacon: 2.2, env: 0.22 },
+  neon: { void: 0x07050f, fog: 0x1b0c2e, grid: 0x6a2a8a, grid2: 0x241036, ink: 0x35d8ff, inkOp: 0.16, accent: 0xff3dbb,
+    sun: 0.4, hemi: 0.4, exposure: 1.0, env: 0.15 },
 };
+const NEON = [[1, 0.17, 0.84], [0.17, 0.95, 1], [1, 0.69, 0.17], [0.49, 1, 0.35]]; // magenta, cyan, amber, lime
+
+// Lit windows drawn in the shader from world position, so no textures or extra geometry are needed.
+function windowMat(color, o) {
+  const m = new THREE.MeshStandardMaterial({ color, roughness: o.rough, metalness: o.metal });
+  m.userData.u = { uTime: { value: 0 }, uDensity: { value: o.density }, uCool: { value: o.cool }, uGlow: { value: 0.95 } };
+  m.onBeforeCompile = (sh) => {
+    Object.assign(sh.uniforms, m.userData.u);
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\nvarying vec3 vWPos; varying vec3 vWNorm;')
+      .replace('#include <project_vertex>', '#include <project_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz; vWNorm = normalize(mat3(modelMatrix) * objectNormal);');
+    sh.fragmentShader = sh.fragmentShader.replace('#include <common>', `#include <common>
+      varying vec3 vWPos; varying vec3 vWNorm; uniform float uTime, uDensity, uCool, uGlow;
+      float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }`)
+      .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      {
+        vec3 n = normalize(vWNorm);
+        if (abs(n.y) < 0.5) {
+          bool sx = abs(n.x) > abs(n.z);
+          float u = sx ? vWPos.z : vWPos.x;
+          float side = sx ? floor(vWPos.x * 0.25) * 7.0 + sign(n.x) * 3.0 : floor(vWPos.z * 0.25) * 13.0 + sign(n.z) * 5.0;
+          vec2 g = vec2(u / 1.1, (vWPos.y - 0.3) / 1.4);
+          vec2 c = floor(g), f = fract(g);
+          float win = step(0.16, f.x) * step(f.x, 0.84) * step(0.28, f.y) * step(f.y, 0.8);
+          float h = h21(c + side * 1.37);
+          float lit = step(uDensity, h);
+          lit = abs(lit - step(0.996, h21(c * 0.7 + floor(uTime * 0.4 + h * 37.0))));
+          vec3 warm = vec3(1.0, 0.66, 0.34), cool = vec3(0.45, 0.85, 1.0);
+          vec3 col = h > 0.975 ? vec3(1.0, 0.2, 0.75) : mix(warm, cool, uCool > 0.5 ? step(0.25, fract(h * 9.1)) : step(0.8, fract(h * 9.1)));
+          totalEmissiveRadiance += col * win * lit * uGlow * (0.45 + 0.55 * h21(c * 1.73 + side));
+        }
+      }`);
+  };
+  return m;
+}
+
+// Scrolling glyph textures for the holographic signs (made-up symbols, no real lettering).
+function glyphTexture(rgb, tall, seed) {
+  const r = rng(seed), W = tall ? 64 : 256, H = tall ? 256 : 128;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'), col = `rgb(${rgb.map(v => Math.round(v * 255)).join(',')})`;
+  g.fillStyle = 'rgba(0,0,0,0.55)'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = col; g.lineWidth = 3; g.strokeRect(2, 2, W - 4, H - 4);
+  g.fillStyle = col;
+  const glyph = (x, y, s) => { for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) if (r() < 0.45) g.fillRect(x + i * s / 4, y + j * s / 4, s / 4 - 1, s / 4 - 1); };
+  if (tall) for (let y = 10; y < H - 30; y += 30) glyph(16, y, 32);
+  else {
+    for (let x = 12; x < W - 40; x += 34) glyph(x, 14, 28);
+    g.fillRect(12, 56, W * (0.3 + r() * 0.5), 10);
+    for (let x = 12; x < W - 22; x += 20) if (r() < 0.7) glyph(x, 80, 16);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
 
 const gloss = (color, o = {}) => new THREE.MeshPhysicalMaterial({ color, roughness: 0.22, metalness: 0.05, clearcoat: 1, clearcoatRoughness: 0.08, ...o });
 
@@ -58,7 +118,7 @@ export class World {
     this.sun.shadow.bias = -0.0005; this.sun.shadow.normalBias = 0.04;
     this.scene.add(this.hemi, this.sun, this.sun.target);
 
-    this.mats = {
+    this.draftMats = this.mats = {
       white: gloss(0xf6f8fb), glass: gloss(0xbcd8f2, { roughness: 0.06, metalness: 0.15 }),
       steel: gloss(0xd5dce6, { metalness: 0.3, roughness: 0.3 }), accent: gloss(0xd4500f),
       beacon: new THREE.MeshStandardMaterial({ color: 0xd4500f, emissive: 0xff6a1f, emissiveIntensity: 0.6, roughness: 0.3 }),
@@ -66,6 +126,31 @@ export class World {
       kerb: gloss(0xfbfcfe), park: gloss(0xd7eee0), water: gloss(0x9cc6ee, { transparent: true, opacity: 0.75, roughness: 0.03 }),
       car: gloss(0xffffff),
     };
+    this.neonMats = {
+      white: windowMat(0x262c3d, { rough: 0.55, metal: 0.3, density: 0.74, cool: 0 }),
+      glass: windowMat(0x15233d, { rough: 0.14, metal: 0.7, density: 0.6, cool: 1 }),
+      steel: new THREE.MeshStandardMaterial({ color: 0x2a3142, metalness: 0.65, roughness: 0.35 }),
+      accent: new THREE.MeshBasicMaterial({ color: new THREE.Color(2.4, 0.35, 1.9) }),
+      beacon: new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 0.25, 0.35) }),
+      tree: new THREE.MeshStandardMaterial({ color: 0x14453c, emissive: 0x0b3b33, emissiveIntensity: 0.6, roughness: 0.5 }),
+      trunk: new THREE.MeshStandardMaterial({ color: 0x232a38 }),
+      road: new THREE.MeshPhysicalMaterial({ color: 0x07090f, roughness: 0.16, metalness: 0.55, clearcoat: 1, clearcoatRoughness: 0.05 }),
+      kerb: new THREE.MeshStandardMaterial({ color: 0x141927, roughness: 0.6, metalness: 0.2 }),
+      park: new THREE.MeshStandardMaterial({ color: 0x0c201d, roughness: 0.8 }),
+      water: new THREE.MeshPhysicalMaterial({ color: 0x06142a, roughness: 0.05, metalness: 0.4, transparent: true, opacity: 0.92 }),
+      car: new THREE.MeshBasicMaterial({ color: 0xffffff }),
+      deck: new THREE.MeshStandardMaterial({ color: 0x1b2131, metalness: 0.5, roughness: 0.4 }),
+      train: new THREE.MeshBasicMaterial({ color: new THREE.Color(1.1, 1.7, 2.2) }),
+    };
+    this.signMats = { solid: [], strip: [], board: [] };
+    for (let c = 0; c < NEON_COLOURS; c++) {
+      const [r, g, b] = NEON[c], hot = new THREE.Color(r * 1.7, g * 1.7, b * 1.7);
+      this.signMats.solid.push(new THREE.MeshBasicMaterial({ color: hot, side: THREE.DoubleSide }));
+      for (const k of ['strip', 'board']) this.signMats[k].push(new THREE.MeshBasicMaterial({ map: glyphTexture(NEON[c], k === 'strip', 99 + c * 7 + (k === 'strip' ? 0 : 3)),
+        color: new THREE.Color(1.5, 1.5, 1.5), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+    }
+    this.glowMat = new THREE.LineBasicMaterial({ color: new THREE.Color(0.4, 2.2, 2.8), transparent: true, opacity: 0.9 });
+    this.glowMat2 = new THREE.LineBasicMaterial({ color: new THREE.Color(2.6, 0.4, 2.0), transparent: true, opacity: 0.9 });
     this.edgeMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.3 });
     this.floorMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.1 });
     this.markMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.35 });
@@ -81,22 +166,37 @@ export class World {
     this.ray = new THREE.Raycaster(); this.tmpV = new THREE.Vector3(); this.tmpM = new THREE.Matrix4(); this.tmpQ = new THREE.Quaternion(); this.one = new THREE.Vector3(1, 1, 1);
     this.selId = null;
 
-    this.setTheme(settings.dark);
+    this.setTheme(settings.theme);
     this.resize(); new ResizeObserver(() => this.resize()).observe(el);
   }
 
-  setTheme(dark) {
-    const t = THEMES[dark ? 'dark' : 'light']; this.t = t;
+  setTheme(theme) {
+    const neon = theme === 'neon', dark = theme === 'night';
+    this.neon = neon;
+    const t = THEMES[neon ? 'neon' : dark ? 'dark' : 'light']; this.t = t;
     this.scene.background = new THREE.Color(t.void);
-    this.scene.fog = new THREE.Fog(t.void, 300, 900);
+    this.scene.fog = neon ? new THREE.FogExp2(t.fog, 0.002) : new THREE.Fog(t.void, 300, 900);
     this.edgeMat.color.set(t.ink); this.edgeMat.opacity = t.inkOp;
-    this.markMat.color.set(dark ? 0x9fb3cc : t.ink); this.markMat.opacity = dark ? 0.35 : 0.3;
-    this.floorMat.color.set(t.floor); this.floorMat.opacity = t.floorOp;
+    this.markMat.color.set(neon ? 0xffb02b : dark ? 0x9fb3cc : t.ink); this.markMat.opacity = neon ? 0.35 : dark ? 0.35 : 0.3;
+    this.floorMat.visible = !neon;
+    if (!neon) {
+      this.floorMat.color.set(t.floor); this.floorMat.opacity = t.floorOp;
+      const D = this.draftMats;
+      D.road.color.set(t.road); D.kerb.color.set(t.kerb); D.park.color.set(t.park);
+      D.beacon.emissiveIntensity = t.beacon;
+    }
     this.selMat.color.set(t.accent); this.hovMat.color.set(t.accent);
-    this.mats.road.color.set(t.road); this.mats.kerb.color.set(t.kerb); this.mats.park.color.set(t.park);
-    this.mats.beacon.emissiveIntensity = t.beacon;
-    for (const k in this.mats) this.mats[k].envMapIntensity = t.env;
+    for (const set of [this.draftMats, this.neonMats]) for (const k in set) set[k].envMapIntensity = t.env;
     this.sun.intensity = t.sun; this.hemi.intensity = t.hemi;
+    this.hemi.color.set(neon ? 0x8a6cff : 0xffffff); this.hemi.groundColor.set(neon ? 0x1a0f2a : 0x9aa8ba);
+    this.sun.color.set(neon ? 0x7fa8ff : 0xffffff);
+    if (neon && !this.composer) {
+      this.composer = new EffectComposer(this.renderer);
+      this.composer.addPass(new RenderPass(this.scene, this.camera));
+      this.bloom = new UnrealBloomPass(new THREE.Vector2(256, 256), 0.7, 0.4, 0.9);
+      this.composer.addPass(this.bloom); this.composer.addPass(new OutputPass());
+      this.resize();
+    }
     this.renderer.toneMappingExposure = t.exposure;
     if (this.grid) this.scene.remove(this.grid);
     this.grid = new THREE.GridHelper(2400, 400, t.grid, t.grid2); this.grid.position.y = -11.98;
@@ -107,6 +207,7 @@ export class World {
   resize() {
     const w = this.el.clientWidth, h = this.el.clientHeight;
     this.renderer.setSize(w, h, false); this.camera.aspect = w / Math.max(1, h); this.camera.updateProjectionMatrix();
+    if (this.composer) { this.composer.setPixelRatio(this.renderer.getPixelRatio()); this.composer.setSize(w, h); }
   }
 
   /* ---------- building the scene ---------- */
@@ -114,7 +215,8 @@ export class World {
     this.city = city;
     for (const o of [...this.cityGroup.children]) { o.traverse(c => { if (c.geometry) c.geometry.dispose(); }); }
     this.cityGroup.clear();
-    this.spinners = [];
+    this.spinners = []; this.cyber = null;
+    const M = city.cyber ? this.neonMats : this.draftMats; this.mats = M;
     const geos = {}, edges = [], floors = [], marks = [];
     const put = (m, g) => (geos[m] || (geos[m] = [])).push(prep(g));
     const seg = (arr, a, b) => arr.push(a[0], a[1], a[2], b[0], b[1], b[2]);
@@ -203,11 +305,11 @@ export class World {
           g.translate(p.x, p.y + p.h / 2, p.z); put(p.m, g);
           const x0 = p.x - p.w / 2, x1 = p.x + p.w / 2, z0 = p.z - p.d / 2, z1 = p.z + p.d / 2;
           boxEdges(edges, x0, p.y, z0, x1, p.y + p.h, z1);
-          if (p.fl) for (let y = p.y + FLOOR; y < p.y + p.h - 0.5; y += FLOOR) loop(floors, x0 - 0.03, z0 - 0.03, x1 + 0.03, z1 + 0.03, y);
+          if (p.fl && !city.cyber) for (let y = p.y + FLOOR; y < p.y + p.h - 0.5; y += FLOOR) loop(floors, x0 - 0.03, z0 - 0.03, x1 + 0.03, z1 + 0.03, y);
         } else if (p.s === 'cyl') {
           const g = new THREE.CylinderGeometry(p.r2 ?? p.r, p.r, p.h, p.seg || 24); g.translate(p.x, p.y + p.h / 2, p.z); put(p.m, g);
           if (p.r > 0.5) { const n = Math.min(40, p.seg || 24); circle(edges, p.x, p.y, p.z, p.r, n); circle(edges, p.x, p.y + p.h, p.z, p.r2 ?? p.r, n); }
-          if (p.fl) for (let y = p.y + FLOOR; y < p.y + p.h - 0.5; y += FLOOR) circle(floors, p.x, y, p.z, p.r + 0.03, Math.min(40, p.seg || 24));
+          if (p.fl && !city.cyber) for (let y = p.y + FLOOR; y < p.y + p.h - 0.5; y += FLOOR) circle(floors, p.x, y, p.z, p.r + 0.03, Math.min(40, p.seg || 24));
         } else if (p.s === 'dome') {
           const g = new THREE.SphereGeometry(p.r, 32, 12, 0, Math.PI * 2, 0, Math.PI / 2); g.translate(p.x, p.y, p.z); put(p.m, g);
           circle(edges, p.x, p.y, p.z, p.r, 32);
@@ -262,7 +364,9 @@ export class World {
     this.carMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.carMesh.castShadow = true; this.carMesh.frustumCulled = false;
     const palette = [0xffffff, 0xffffff, 0xffffff, 0xf2f5f9, 0xd4500f, 0x8fb8e6, 0xc9d2dd];
     const col = new THREE.Color();
-    this.cars.forEach((c, i) => this.carMesh.setColorAt(i, col.set(palette[Math.floor(r() * palette.length)])));
+    this.cars.forEach((c, i) => this.carMesh.setColorAt(i, city.cyber
+      ? (r() < 0.5 ? col.setRGB(2.2, 2.0, 1.7) : col.setRGB(2.6, 0.15, 0.2))
+      : col.set(palette[Math.floor(r() * palette.length)])));
     this.cityGroup.add(this.carMesh);
 
     /* survey drones circling the tall towers */
@@ -273,8 +377,113 @@ export class World {
     this.droneMesh.frustumCulled = false;
     this.cityGroup.add(this.droneMesh);
 
+    if (city.cyber) this.buildCyber(city, M, r, seg);
+
     this.boxes = city.buildings.map(b => new THREE.Box3(new THREE.Vector3(b.box.x0, 0, b.box.z0), new THREE.Vector3(b.box.x1, b.box.y1, b.box.z1)));
     this.select(null); this.hover(null);
+  }
+
+  /* ---------- the neon layer ---------- */
+  buildCyber(city, M, r, seg) {
+    const cy = this.cyber = {};
+    const glow = [], glow2 = [], solid = {};
+    const add = (mesh) => { this.cityGroup.add(mesh); return mesh; };
+    const lineMesh = (arr, mat) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); const l = new THREE.LineSegments(g, mat); l.frustumCulled = false; return add(l); };
+
+    // signs: each colour and kind merged into one mesh
+    const groups = {};
+    for (const sg of city.signs) {
+      const key = (sg.holo ? sg.kind : 'solid') + ':' + sg.c;
+      const g = new THREE.PlaneGeometry(sg.w, sg.h); g.rotateY(sg.rot); g.translate(sg.x, sg.y, sg.z);
+      (groups[key] || (groups[key] = [])).push(g);
+    }
+    for (const key in groups) {
+      const [kind, c] = key.split(':');
+      add(new THREE.Mesh(mergeGeometries(groups[key]), this.signMats[kind][+c]));
+    }
+
+    // skybridges and pipes, with a glowing strip under each bridge
+    const beamGeos = { white: [], steel: [] };
+    for (const b of city.beams) {
+      const dx = b.b[0] - b.a[0], dz = b.b[2] - b.a[2], len = Math.hypot(dx, dz);
+      const g = new THREE.BoxGeometry(len, b.h, b.w); g.rotateY(-Math.atan2(dz, dx));
+      g.translate((b.a[0] + b.b[0]) / 2, b.a[1] + b.h / 2, (b.a[2] + b.b[2]) / 2);
+      beamGeos[b.m].push(prep(g));
+      if (b.glow) {
+        const nx = -dz / len * b.w / 2, nz = dx / len * b.w / 2;
+        for (const sgn of [-1, 1]) seg(r() < 0.7 ? glow : glow2, [b.a[0] + nx * sgn, b.a[1] - 0.05, b.a[2] + nz * sgn], [b.b[0] + nx * sgn, b.a[1] - 0.05, b.b[2] + nz * sgn]);
+      }
+    }
+    for (const m in beamGeos) if (beamGeos[m].length) { const mesh = add(new THREE.Mesh(mergeGeometries(beamGeos[m]), M[m])); mesh.castShadow = true; }
+
+    // walkway decks over the streets
+    const deckGeos = [];
+    for (const d of city.decks) {
+      const len = d.s1 - d.s0, mid = (d.s0 + d.s1) / 2;
+      const g = d.ax === 'x' ? new THREE.BoxGeometry(d.w, 0.7, len) : new THREE.BoxGeometry(len, 0.7, d.w);
+      g.translate(d.ax === 'x' ? d.line : mid, d.y, d.ax === 'x' ? mid : d.line); deckGeos.push(prep(g));
+      for (const sgn of [-1, 1]) {
+        const o = d.line + sgn * d.w / 2, y = d.y + 0.4;
+        if (d.ax === 'x') seg(glow, [o, y, d.s0], [o, y, d.s1]); else seg(glow, [d.s0, y, o], [d.s1, y, o]);
+        const ry = d.y + 1.3; // railing
+        if (d.ax === 'x') seg(glow2, [o, ry, d.s0], [o, ry, d.s1]); else seg(glow2, [d.s0, ry, o], [d.s1, ry, o]);
+      }
+    }
+    if (deckGeos.length) { const mesh = add(new THREE.Mesh(mergeGeometries(deckGeos), M.deck)); mesh.castShadow = true; mesh.receiveShadow = true; }
+
+    // elevated rail loop: deck, pillars, glowing edges, and two trains
+    const rail = city.rail, pts = rail.pts, railGeos = [];
+    cy.railLen = 0; cy.railSegs = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length], dx = b[0] - a[0], dz = b[1] - a[1], len = Math.hypot(dx, dz);
+      const g = new THREE.BoxGeometry(Math.abs(dx) + 3, 1, Math.abs(dz) + 3); g.translate((a[0] + b[0]) / 2, rail.y - 0.5, (a[1] + b[1]) / 2); railGeos.push(prep(g));
+      for (let s = 0; s < len; s += PITCH) {
+        const x = a[0] + dx / len * s, z = a[1] + dz / len * s;
+        const pg = new THREE.CylinderGeometry(0.9, 1.2, rail.y - 1, 12); pg.translate(x, (rail.y - 1) / 2, z); railGeos.push(prep(pg));
+      }
+      const nx = -dz / len * 1.5, nz = dx / len * 1.5;
+      for (const sgn of [-1, 1]) seg(glow, [a[0] + nx * sgn, rail.y + 0.02, a[1] + nz * sgn], [b[0] + nx * sgn, rail.y + 0.02, b[1] + nz * sgn]);
+      cy.railSegs.push({ a, dx: dx / len, dz: dz / len, len, at: cy.railLen }); cy.railLen += len;
+    }
+    const railMesh = add(new THREE.Mesh(mergeGeometries(railGeos), M.deck)); railMesh.castShadow = true;
+    const carsPer = 6;
+    cy.trains = [{ s: 0, v: 22 }, { s: cy.railLen / 2, v: 22 }];
+    cy.trainMesh = add(new THREE.InstancedMesh(new RoundedBoxGeometry(5.2, 1.7, 2.2, 2, 0.4), M.train, cy.trains.length * carsPer));
+    cy.trainMesh.frustumCulled = false; cy.carsPer = carsPer;
+
+    lineMesh(glow, this.glowMat); lineMesh(glow2, this.glowMat2);
+
+    // flying traffic: lanes above the streets at two heights
+    cy.fly = [];
+    for (let k = 1; k < N; k++) for (const ax of ['x', 'z']) for (const lvl of [46, 64]) for (const dir of [1, -1]) {
+      if (r() < 0.35) continue;
+      const n = 3 + Math.floor(r() * 4), speed = 16 + r() * 12, off = r() * 2 * HALF;
+      for (let c = 0; c < n; c++) cy.fly.push({ ax, line: roadLine(k) + dir * 1.8 * (ax === 'x' ? -1 : 1), y: lvl + (dir > 0 ? 0 : 3), dir, speed, s: ((c / n) * 2 * HALF + off) % (2 * HALF) - HALF });
+    }
+    cy.flyMesh = add(new THREE.InstancedMesh(new RoundedBoxGeometry(2.4, 0.6, 1.1, 2, 0.25), M.car, cy.fly.length));
+    const col = new THREE.Color(), flyCols = [[0.4, 2.2, 2.8], [2.6, 0.4, 2.0], [2.6, 1.6, 0.4], [2.2, 2.2, 2.4]];
+    cy.fly.forEach((f, i) => cy.flyMesh.setColorAt(i, col.setRGB(...flyCols[Math.floor(r() * flyCols.length)])));
+    cy.flyMesh.frustumCulled = false; cy.flyMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+    // searchlights sweeping the clouds
+    cy.lights = city.lights.map(l => {
+      const g = new THREE.ConeGeometry(16, 220, 28, 1, true); g.rotateX(Math.PI); g.translate(0, 110, 0);
+      const beam = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(0.55, 0.65, 1), transparent: true, opacity: 0.05, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+      beam.rotation.x = 0.5;
+      const pivot = new THREE.Group(); pivot.position.set(l.x, l.y, l.z); pivot.add(beam); add(pivot);
+      return { pivot, l };
+    });
+
+    // rain falling around the camera
+    const R = 5000, rp = new Float32Array(R * 6);
+    cy.rainY = new Float32Array(R); cy.rainSpeed = new Float32Array(R);
+    for (let i = 0; i < R; i++) {
+      const x = (r() - 0.5) * 300, z = (r() - 0.5) * 300, y = r() * 200;
+      rp.set([x, y, z, x + 0.25, y + 2.2, z + 0.15], i * 6); cy.rainY[i] = y; cy.rainSpeed[i] = 70 + r() * 40;
+    }
+    const rg = new THREE.BufferGeometry(); rg.setAttribute('position', new THREE.BufferAttribute(rp, 3));
+    cy.rain = add(new THREE.LineSegments(rg, new THREE.LineBasicMaterial({ color: 0x9fb8ff, transparent: true, opacity: 0.28, depthWrite: false })));
+    cy.rain.frustumCulled = false;
   }
 
   /* ---------- selection ---------- */
@@ -317,7 +526,8 @@ export class World {
     this.sun.position.set(tg.x + 120, 220, tg.z + 90); this.sun.target.position.copy(tg);
     const sc = this.sun.shadow.camera;
     if (sc.right !== ext) { Object.assign(sc, { left: -ext, right: ext, top: ext, bottom: -ext, near: 10, far: 800 }); sc.updateProjectionMatrix(); }
-    this.scene.fog.near = cam.dist * 1.5; this.scene.fog.far = cam.dist * 4.5 + 200;
+    if (this.scene.fog.isFogExp2) this.scene.fog.density = 0.42 / (cam.dist + 90);
+    else { this.scene.fog.near = cam.dist * 1.5; this.scene.fog.far = cam.dist * 4.5 + 200; }
 
     if (this.carMesh) {
       this.carMesh.visible = !calm;
@@ -346,9 +556,53 @@ export class World {
         this.droneMesh.instanceMatrix.needsUpdate = true;
       }
       for (const s of this.spinners) if (!calm) s.rotation.z += dt * s.userData.speed;
-      this.mats.beacon.emissiveIntensity = this.t.beacon * (0.55 + 0.45 * Math.max(0, Math.sin(t * 2.2)));
+      if (this.mats.beacon.emissive) this.mats.beacon.emissiveIntensity = this.t.beacon * (0.55 + 0.45 * Math.max(0, Math.sin(t * 2.2)));
+      else this.mats.beacon.color.setRGB(3 * (0.3 + 0.7 * Math.max(0, Math.sin(t * 2.2))), 0.25, 0.35);
     }
-    this.renderer.render(this.scene, this.camera);
+    if (this.cyber) this.frameCyber(dt, t, cam, calm);
+    if (this.neon && this.composer) this.composer.render(); else this.renderer.render(this.scene, this.camera);
+  }
+
+  frameCyber(dt, t, cam, calm) {
+    const cy = this.cyber, M = this.mats;
+    M.white.userData.u.uTime.value = t; M.glass.userData.u.uTime.value = t;
+    // signs scroll, and now and then one flickers
+    for (const k of ['strip', 'board']) this.signMats[k].forEach((m, i) => {
+      if (!calm) { if (k === 'strip') m.map.offset.y = (m.map.offset.y + dt * (0.04 + i * 0.012)) % 1; else m.map.offset.x = (m.map.offset.x + dt * (0.03 + i * 0.01)) % 1; }
+      const f = Math.sin(t * 23 + i * 7) > 0.97 ? 0.35 : 1; m.color.setScalar(1.5 * f);
+    });
+    this.signMats.solid.forEach((m, i) => { const [r, g, b] = NEON[i], f = (Math.sin(t * 17 + i * 3) > 0.985 ? 0.3 : 1) * 1.7; m.color.setRGB(r * f, g * f, b * f); });
+    cy.flyMesh.visible = cy.trainMesh.visible = cy.rain.visible = !calm;
+    for (const s of cy.lights) s.pivot.rotation.y = s.l.phase + t * s.l.speed;
+    if (calm) return;
+    cy.fly.forEach((c, i) => {
+      c.s += c.dir * c.speed * dt;
+      if (c.s > HALF) c.s -= 2 * HALF; else if (c.s < -HALF) c.s += 2 * HALF;
+      const x = c.ax === 'x' ? c.line : c.s, z = c.ax === 'x' ? c.s : c.line;
+      this.tmpQ.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, c.ax === 'x' ? Math.PI / 2 : 0);
+      this.tmpM.compose(this.tmpV.set(x, c.y + Math.sin(t + i) * 0.3, z), this.tmpQ, this.one); cy.flyMesh.setMatrixAt(i, this.tmpM);
+    });
+    cy.flyMesh.instanceMatrix.needsUpdate = true;
+    let n = 0;
+    for (const tr of cy.trains) {
+      tr.s = (tr.s + tr.v * dt) % cy.railLen;
+      for (let c = 0; c < cy.carsPer; c++) {
+        let s = (tr.s - c * 5.6 + cy.railLen) % cy.railLen;
+        const sg = cy.railSegs.find(q => s >= q.at && s < q.at + q.len) || cy.railSegs[0]; s -= sg.at;
+        this.tmpQ.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, -Math.atan2(sg.dz, sg.dx));
+        this.tmpM.compose(this.tmpV.set(sg.a[0] + sg.dx * s, this.city.rail.y + 0.95, sg.a[1] + sg.dz * s), this.tmpQ, this.one);
+        cy.trainMesh.setMatrixAt(n++, this.tmpM);
+      }
+    }
+    cy.trainMesh.instanceMatrix.needsUpdate = true;
+    // rain: each streak falls and wraps; the whole box follows the camera
+    const pos = cy.rain.geometry.attributes.position.array;
+    for (let i = 0; i < cy.rainY.length; i++) {
+      let y = cy.rainY[i] - cy.rainSpeed[i] * dt; if (y < 0) y += 200; cy.rainY[i] = y;
+      pos[i * 6 + 1] = y; pos[i * 6 + 4] = y + 2.2;
+    }
+    cy.rain.geometry.attributes.position.needsUpdate = true;
+    cy.rain.position.set(cam.target.x, 0, cam.target.z);
   }
 
   project(x, y, z) {

@@ -10,6 +10,14 @@ Open `index.html` through any static web host. On GitHub Pages: **Settings → P
 
 Every city comes from a seed number, and the address bar link includes it (`?seed=1234`), so a city can be shared or revisited.
 
+## Styles
+
+The **Style** button cycles three looks:
+
+- **Draft**: the white drafting sheet.
+- **Night**: the same sheet at night, with floor lines lit like windows.
+- **Neon**: the same seed redrawn as a cyberpunk vertical city. Towers are about 1.5× taller, two blocks become stepped arcologies, the terraces become crooked stacked housing with pods bolted on, and the streets get skybridges, pipes, walkways at three levels, an elevated train loop, flying traffic, neon and holographic signs, searchlights, rain and bloom.
+
 ## Version 0.2 contents
 
 - A 16 × 16 block city, about 2,900 buildings, split into districts: Civic Core (towers and a domed rotunda), Midtown, the Terraces (row houses), River Works (sheds, tanks and chimneys) and parks.
@@ -33,7 +41,7 @@ Every city comes from a seed number, and the address bar link includes it (`?see
 ## Code layout
 
 - `js/city.js`: the city generator (plain data, seeded)
-- `js/world.js`: three.js scene, merged geometry, traffic and selection
+- `js/world.js`: three.js scene, merged geometry, traffic, selection, and the neon layer (window shader, signs, bloom, rain)
 - `js/camera.js`: Anno-style camera
 - `js/main.js`: input, panels, labels and settings
 

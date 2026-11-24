@@ -41,7 +41,11 @@ export const DISTRICTS = {
   res: { name: 'Terraces', code: 'TR' },
   works: { name: 'River Works', code: 'RW' },
   park: { name: 'Park', code: 'PK' },
+  arco: { name: 'Arcology', code: 'AR' },
 };
+const CYBER_NAMES = { civic: 'Spire District', core: 'Spire District', mid: 'Neon Mile', res: 'The Stacks', works: 'Dock Works', park: 'Green Vault', arco: 'Arcology' };
+export const districtName = (k, cyber) => (cyber ? CYBER_NAMES[k] : DISTRICTS[k].name);
+export const NEON_COLOURS = 4; // magenta, cyan, amber, lime
 
 /* ---------- lots ---------- */
 function split(rect, min, r, out) {
@@ -96,13 +100,14 @@ function crown(r, parts, x, z, y, w, d, kind) {
 }
 
 /* ---------- building generators ---------- */
-function tower(r, lot, near, forced) {
+function tower(r, lot, near, forced, cy = false) {
   const q = inset(lot, 0.9), { w, d, x, z } = dims(q), parts = [];
   const pod = range(r, 3, 7);
   parts.push({ s: 'box', m: 'white', x, z, y: KERB, w, d, h: pod, fl: true });
   let H = pod + range(r, 16, 34) + Math.pow(r(), 1.4) * 85 * (0.35 + 0.65 * near);
   let style = pick(r, ['setback', 'setback', 'slab', 'cyl', 'setback']);
-  if (forced) { H = range(r, 150, 172); style = 'setback'; }
+  if (cy) H = pod + (H - pod) * 1.55;
+  if (forced) { H = cy ? range(r, 230, 260) : range(r, 150, 172); style = 'setback'; }
   let bw = Math.max(4, w - range(r, 2, 4)), bd = Math.max(4, d - range(r, 2, 4)), y = KERB + pod;
   let type = 'Setback tower';
   if (style === 'cyl' && Math.min(bw, bd) >= 7) {
@@ -140,9 +145,9 @@ function tower(r, lot, near, forced) {
   return { type, parts };
 }
 
-function midrise(r, lot, near) {
+function midrise(r, lot, near, cy = false) {
   const q = inset(lot, 0.8), { w, d, x, z } = dims(q), parts = [];
-  const H = range(r, 7, 18) + r() * 16 * near;
+  const H = (range(r, 7, 18) + r() * 16 * near) * (cy ? 1.7 : 1);
   const m = r() < 0.2 ? 'glass' : 'white';
   let type = m === 'glass' ? 'Glass office' : 'Mid-rise block';
   if (r() < 0.35 && H > 12) {
@@ -204,6 +209,43 @@ function works(r, lot) {
   return { type: 'Tank farm', parts };
 }
 
+// The Stacks: housing piled up crookedly, each block on top of the last.
+function stack(r, lot) {
+  const q = inset(lot, 0.6), { w, d, x, z } = dims(q), parts = [];
+  let H = range(r, 8, 22), y = KERB, cw = w, cd = d, cx = x, cz = z;
+  parts.push({ s: 'box', m: 'white', x, z, y, w, d, h: H, fl: true }); y += H;
+  const n = Math.floor(r() * 3);
+  for (let k = 0; k < n; k++) {
+    const nw = Math.max(3, cw * range(r, 0.6, 0.95)), nd = Math.max(3, cd * range(r, 0.6, 0.95));
+    cx = clamp(cx + range(r, -1.6, 1.6), x - w / 2 + nw / 2 - 1, x + w / 2 - nw / 2 + 1);
+    cz = clamp(cz + range(r, -1.6, 1.6), z - d / 2 + nd / 2 - 1, z + d / 2 - nd / 2 + 1);
+    const h = range(r, 3.5, 9);
+    parts.push({ s: 'box', m: r() < 0.25 ? 'steel' : 'white', x: cx, z: cz, y, w: nw, d: nd, h, fl: true });
+    y += h; cw = nw; cd = nd;
+  }
+  if (r() < 0.5) parts.push({ s: 'cyl', m: 'steel', x: cx + cw * 0.2, z: cz, y, r: 0.9, h: 1.8, seg: 14 });
+  if (r() < 0.35) { const ah = range(r, 4, 10); parts.push({ s: 'cyl', m: 'steel', x: cx - cw * 0.25, z: cz - cd * 0.2, y, r: 0.12, h: ah, seg: 6 }); parts.push({ s: 'sph', m: 'beacon', x: cx - cw * 0.25, z: cz - cd * 0.2, y: y + ah, r: 0.3 }); }
+  return { type: 'Stack housing', parts };
+}
+
+// A whole block as one stepped megastructure.
+function arcology(r, block) {
+  const parts = []; let q = inset(block, 0.8), y = KERB;
+  const tiers = 6 + Math.floor(r() * 3);
+  for (let t = 0; t < tiers; t++) {
+    const { w, d, x, z } = dims(q), h = range(r, 18, 30);
+    parts.push({ s: 'box', m: t % 2 ? 'glass' : 'white', x, z, y, w, d, h, fl: true });
+    y += h;
+    parts.push({ s: 'box', m: 'accent', x, z, y: y - 0.6, w: w + 0.25, d: d + 0.25, h: 0.35 });
+    const nq = inset(q, range(r, 1.3, 2.3));
+    if (nq.x1 - nq.x0 < 5 || nq.z1 - nq.z0 < 5) break;
+    q = nq;
+  }
+  const { w, d, x, z } = dims(q);
+  crown(r, parts, x, z, y, w, d, 'spire');
+  return { type: 'Arcology', parts };
+}
+
 function rotunda(r, block) {
   const { x, z } = dims(block), parts = [];
   parts.push({ s: 'cyl', m: 'white', x, z, y: KERB, r: 10.6, h: 0.8, seg: 48 });
@@ -220,8 +262,8 @@ function rotunda(r, block) {
 }
 
 /* ---------- the city ---------- */
-export function generateCity(seed) {
-  const r = rng(seed);
+export function generateCity(seed, opts = {}) {
+  const r = rng(seed), cy = !!opts.cyber;
   const name = `${pick(r, NAME_A)} ${pick(r, NAME_B)}`, river = pick(r, RIVERS);
   const civic = { i: 7 + Math.floor(r() * 2), j: 5 + Math.floor(r() * 2) };
   const cb = blockRect(civic.i, civic.j), C = { x: (cb.x0 + cb.x1) / 2, z: (cb.z0 + cb.z1) / 2 };
@@ -247,11 +289,16 @@ export function generateCity(seed) {
     else b.kind = 'res';
     blocks.push(b);
   }
+  if (cy) { // two blocks near the centre become arcologies
+    const cand = blocks.filter(b => (b.kind === 'core' || b.kind === 'mid') && b.d > 0.14 && b.d < 0.45);
+    for (let k = 0; k < 2 && cand.length; k++) cand.splice(Math.floor(r() * cand.length), 1)[0].kind = 'arco';
+  }
 
   for (const b of blocks) {
     const rect = { x0: b.x0, z0: b.z0, x1: b.x1, z1: b.z1 };
     const near = clamp(1 - b.d / 0.27, 0, 1);
     if (b.kind === 'river') continue;
+    if (b.kind === 'arco') { add(arcology(r, rect), 'arco', rect); continue; }
     if (b.kind === 'civic') {
       add(rotunda(r, rect), 'civic', rect);
       for (const sx of [-1, 1]) for (const sz of [-1, 1]) for (let k = 0; k < 3; k++)
@@ -271,15 +318,16 @@ export function generateCity(seed) {
       }
       continue;
     }
-    const min = { core: 9, mid: 7.5, res: 11, works: 10 }[b.kind];
+    const min = { core: 9, mid: 7.5, res: cy ? 8 : 11, works: 10 }[b.kind];
     const lots = []; split(rect, min, r, lots);
     for (const lot of lots) {
-      if (b.kind === 'core') add(tower(r, lot, near), 'core', lot);
+      if (b.kind === 'core') add(tower(r, lot, near, false, cy), 'core', lot);
       else if (b.kind === 'mid') {
         const mn = clamp(1 - b.d / 0.55, 0, 1); // the odd tower spills out of the core into midtown
-        add(r() < 0.18 * mn && lot.x1 - lot.x0 > 9 && lot.z1 - lot.z0 > 9 ? tower(r, lot, 0.15) : midrise(r, lot, mn), 'mid', lot);
+        add(r() < (cy ? 0.3 : 0.18) * mn && lot.x1 - lot.x0 > 9 && lot.z1 - lot.z0 > 9 ? tower(r, lot, 0.15, false, cy) : midrise(r, lot, mn, cy), 'mid', lot);
       }
       else if (b.kind === 'works') add(works(r, lot), 'works', lot);
+      else if (cy) add(stack(r, lot), 'res', lot);
       else { // terraces: split into small house plots, with the odd garden tree
         const small = []; split(lot, 4.5, r, small);
         for (const s of small) {
@@ -299,7 +347,7 @@ export function generateCity(seed) {
     if (sc > score) { score = sc; best = bd; }
   }
   if (best) {
-    const t = tower(r, best.lot, 1, true);
+    const t = tower(r, best.lot, 1, true, cy);
     Object.assign(best, t, { box: bounds(t.parts), landmark: true });
     best.h = best.box.y1;
   }
@@ -311,11 +359,11 @@ export function generateCity(seed) {
   // Labels for the districts.
   const labels = [];
   const centroid = (list) => list.length ? { x: list.reduce((a, b) => a + b.cx, 0) / list.length, z: list.reduce((a, b) => a + b.cz, 0) / list.length } : null;
-  labels.push({ text: 'Civic Core', x: C.x, z: C.z - BLOCK * 0.62 });
+  labels.push({ text: cy ? 'Spire District' : 'Civic Core', x: C.x, z: C.z - BLOCK * 0.62 });
   const mid = blocks.filter(b => b.kind === 'mid').sort((a, b) => (b.cx - a.cx) - (a.cz - b.cz) * 0.3)[0];
-  if (mid) labels.push({ text: 'Midtown', x: mid.cx, z: mid.cz });
+  if (mid) labels.push({ text: cy ? 'Neon Mile' : 'Midtown', x: mid.cx, z: mid.cz });
   const w = centroid(blocks.filter(b => b.kind === 'works'));
-  if (w) labels.push({ text: `${river} Works`, x: w.x, z: w.z });
+  if (w) labels.push({ text: cy ? `${river} Docks` : `${river} Works`, x: w.x, z: w.z });
   labels.push({ text: `River ${river}`, x: -HALF + PITCH * 1.5, z: blockRect(0, RIVER_ROW).z0 + BLOCK / 2, river: true });
   const quads = { North: [], South: [], East: [], West: [] };
   for (const b of blocks.filter(b => b.kind === 'res')) {
@@ -324,9 +372,106 @@ export function generateCity(seed) {
   }
   for (const k in quads) if (quads[k].length > 2) {
     const c = quads[k].sort((a, b) => b.d - a.d)[Math.floor(quads[k].length / 2)];
-    labels.push({ text: `${k} Terraces`, x: c.cx, z: c.cz });
+    labels.push({ text: cy ? `${k} Stacks` : `${k} Terraces`, x: c.cx, z: c.cz });
   }
 
+  for (const b of blocks.filter(b => b.kind === 'arco')) labels.push({ text: 'Arcology', x: b.cx, z: b.cz + BLOCK * 0.7 });
+
   const tallest = buildings.reduce((a, b) => (b.h > a.h ? b : a), buildings[0]);
-  return { seed, name, river, C, civic, blocks, buildings, trees, ponds, labels, tallest };
+  const city = { seed, cyber: cy, name, river, C, civic, blocks, buildings, trees, ponds, labels, tallest };
+  if (cy) addCyber(r, city);
+  return city;
+}
+
+/* ---------- the cyberpunk layer: everything that hangs between and above the buildings ---------- */
+function faceAt(parts, y, h) { // the widest box that covers this height band
+  let best = null;
+  for (const p of parts) if (p.s === 'box' && p.m !== 'accent' && p.y <= y && p.y + p.h >= y + h && p.w > 2 && p.d > 2 && (!best || p.w * p.d > best.w * best.d)) best = p;
+  return best;
+}
+
+function addCyber(r, city) {
+  const { buildings, blocks, C, civic } = city;
+  const signs = [], beams = [], decks = [], lights = [];
+
+  for (const b of buildings) {
+    // pods and shacks bolted onto the sides of busy buildings
+    if ((b.district === 'mid' || b.district === 'res' || b.district === 'core') && b.h > 8 && r() < 0.55) {
+      const n = 1 + Math.floor(r() * 3);
+      for (let k = 0; k < n; k++) {
+        const y = range(r, KERB + 3, Math.max(KERB + 4, b.h * 0.7)), h = range(r, 1.6, 3.2), p = faceAt(b.parts, y, h);
+        if (!p) continue;
+        const f = Math.floor(r() * 4), pw = range(r, 1.8, 3.6), pd = range(r, 1.4, 2.4);
+        let x = p.x, z = p.z;
+        if (f === 0) x += p.w / 2 + pd / 2; else if (f === 1) x -= p.w / 2 + pd / 2; else if (f === 2) z += p.d / 2 + pd / 2; else z -= p.d / 2 + pd / 2;
+        if (f < 2) z += range(r, -1, 1) * Math.max(0, p.d / 2 - pw / 2); else x += range(r, -1, 1) * Math.max(0, p.w / 2 - pw / 2);
+        b.parts.push({ s: 'box', m: r() < 0.4 ? 'steel' : 'white', x, z, y, w: f < 2 ? pd : pw, d: f < 2 ? pw : pd, h });
+      }
+    }
+    // neon signs: vertical strips, blade signs sticking out, and billboards
+    if (b.h < 9) continue;
+    const big = b.district === 'core' || b.district === 'arco';
+    const n = big ? 2 + Math.floor(r() * 3) : (r() < 0.65 ? 1 : 0) + (r() < 0.3 ? 1 : 0);
+    for (let k = 0; k < n; k++) {
+      const kind = r() < 0.55 ? 'strip' : 'board';
+      const h = kind === 'strip' ? range(r, 5, 14) : range(r, 3, 6), w = kind === 'strip' ? range(r, 0.9, 1.4) : range(r, 5, 10);
+      const y = range(r, KERB + 2, Math.max(KERB + 3, Math.min(b.h * 0.65, 55) - h));
+      const p = faceAt(b.parts, y, h); if (!p) continue;
+      const f = Math.floor(r() * 4), faceW = f < 2 ? p.d : p.w;
+      if (faceW < w + 0.8) continue;
+      const blade = kind === 'strip' && r() < 0.5, off = 0.08 + (blade ? w / 2 + 0.15 : 0);
+      const slide = range(r, -1, 1) * Math.max(0, faceW / 2 - w / 2 - 0.3);
+      let x = p.x, z = p.z, rot;
+      if (f === 0) { x += p.w / 2 + off; z += slide; rot = Math.PI / 2; }
+      else if (f === 1) { x -= p.w / 2 + off; z += slide; rot = -Math.PI / 2; }
+      else if (f === 2) { z += p.d / 2 + off; x += slide; rot = 0; }
+      else { z -= p.d / 2 + off; x += slide; rot = Math.PI; }
+      if (blade) rot += Math.PI / 2;
+      signs.push({ kind, x, y: y + h / 2, z, w, h, rot, c: Math.floor(r() * NEON_COLOURS), holo: r() < 0.65 });
+    }
+  }
+
+  // skybridges and pipes between tall neighbours
+  const tall = buildings.filter(b => b.h > 40);
+  const mid = (b) => [(b.box.x0 + b.box.x1) / 2, (b.box.z0 + b.box.z1) / 2];
+  const linked = new Set();
+  for (const a of tall) {
+    if (r() > 0.6) continue;
+    const [ax, az] = mid(a);
+    let best = null, bd = Infinity;
+    for (const b of tall) {
+      if (b === a || linked.has(a.id + ':' + b.id)) continue;
+      const [bx, bz] = mid(b), d = Math.hypot(ax - bx, az - bz);
+      if (d > 16 && d < 55 && d < bd) { bd = d; best = b; }
+    }
+    if (!best) continue;
+    linked.add(a.id + ':' + best.id); linked.add(best.id + ':' + a.id);
+    const [bx, bz] = mid(best), top = Math.min(a.h, best.h);
+    beams.push({ a: [ax, range(r, 14, top * 0.75), az], b: [bx, 0, bz], w: 2.4, h: 1.8, m: 'white', glow: true });
+    beams[beams.length - 1].b[1] = beams[beams.length - 1].a[1];
+    if (r() < 0.45) { const y = range(r, 10, top * 0.85); beams.push({ a: [ax, y, az], b: [bx, y, bz], w: 0.7, h: 0.7, m: 'steel' }); }
+  }
+
+  // elevated walkways over the streets near the centre, at three levels
+  for (let k = 1; k < N; k++) for (let j = 0; j < N; j++) for (const ax of ['x', 'z']) {
+    const line = roadLine(k), s0 = roadLine(j) + ROAD / 2 - 1, s1 = roadLine(j + 1) - ROAD / 2 + 1;
+    const mx = ax === 'x' ? line : (s0 + s1) / 2, mz = ax === 'x' ? (s0 + s1) / 2 : line;
+    if (Math.hypot(mx - C.x, mz - C.z) / HALF > 0.5) continue;
+    if (ax === 'x' && j === RIVER_ROW) continue;
+    if (r() > 0.32) continue;
+    decks.push({ ax, line, s0, s1, y: 14 + 7 * Math.floor(r() * 3), w: ROAD - 0.6 });
+  }
+
+  // an elevated train loop around the centre
+  const kx0 = Math.max(1, civic.i - 3), kx1 = Math.min(N - 1, civic.i + 4), kz0 = Math.max(1, civic.j - 3), kz1 = Math.min(RIVER_ROW - 1, civic.j + 4);
+  const rail = { y: 34, pts: [[roadLine(kx0), roadLine(kz0)], [roadLine(kx1), roadLine(kz0)], [roadLine(kx1), roadLine(kz1)], [roadLine(kx0), roadLine(kz1)]] };
+
+  // searchlights on the tallest roofs
+  for (const b of [...buildings].sort((a, b) => b.h - a.h).slice(0, 7)) {
+    const [x, z] = mid(b); lights.push({ x, z, y: b.h - 2, phase: r() * 6.28, speed: (0.15 + r() * 0.2) * (r() < 0.5 ? 1 : -1) });
+  }
+
+  for (const b of buildings) { b.box = bounds(b.parts); b.h = b.box.y1; }
+  city.tallest = buildings.reduce((a, b) => (b.h > a.h ? b : a), buildings[0]);
+  Object.assign(city, { signs, beams, decks, rail, lights });
 }

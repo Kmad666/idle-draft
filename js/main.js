@@ -1,7 +1,7 @@
 // Wiring: city generation, camera, input, panels, labels and settings.
 import { World } from './world.js';
 import { AnnoCamera } from './camera.js';
-import { generateCity, HALF, METRES, FLOOR, DISTRICTS } from './city.js';
+import { generateCity, HALF, METRES, FLOOR, districtName } from './city.js';
 
 const KEY = 'idle-draft-city-v1';
 const $ = (q) => document.querySelector(q);
@@ -9,11 +9,17 @@ const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt
 const m = (u) => Math.round(u * METRES);
 
 /* ---------- settings ---------- */
-let prefs = { settings: { dark: false, edgeScroll: false, calm: false, labels: true }, seed: null };
+let prefs = { settings: { theme: 'draft', edgeScroll: false, calm: false, labels: true }, seed: null };
 try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); prefs = { ...prefs, ...p, settings: { ...prefs.settings, ...p.settings } }; } } catch { /* storage off */ }
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* storage off */ } };
 const S = prefs.settings;
-document.documentElement.dataset.mode = S.dark ? 'dark' : 'light';
+if (S.dark !== undefined) { if (S.dark) S.theme = 'night'; delete S.dark; } // older saves
+const STYLES = { draft: { label: 'Draft', mode: 'light', drawing: 'Cityscape, general arrangement' },
+  night: { label: 'Night', mode: 'dark', drawing: 'Cityscape, night sheet' },
+  neon: { label: 'Neon', mode: 'neon', drawing: 'Neon sprawl, vertical city' } };
+const ORDER = ['draft', 'night', 'neon'];
+if (!STYLES[S.theme]) S.theme = 'draft';
+document.documentElement.dataset.mode = STYLES[S.theme].mode;
 
 const urlSeed = parseInt(new URLSearchParams(location.search).get('seed'), 10);
 const randomSeed = () => Math.floor(Math.random() * 999999) + 1;
@@ -34,12 +40,13 @@ function toast(msg) {
 function build(newSeed, fly = true) {
   seed = newSeed; prefs.seed = seed; save();
   const u = new URL(location.href); u.searchParams.set('seed', seed); history.replaceState(null, '', u);
-  city = generateCity(seed);
+  city = generateCity(seed, { cyber: S.theme === 'neon' });
   world.build(city);
   sel = hov = null; renderPanel();
   $('#cityName').textContent = city.name;
   $('#cityStats').textContent = `${city.buildings.length.toLocaleString('en-US')} buildings`;
-  $('#tbCity').textContent = city.name; $('#tbSeed').textContent = seed;
+  $('#tbCity').textContent = city.name; $('#tbSeed').textContent = seed; $('#tbDrawing').textContent = STYLES[S.theme].drawing;
+  $('#btnStyle').textContent = `Style: ${STYLES[S.theme].label}`;
   $('#tbCount').textContent = city.buildings.length.toLocaleString('en-US'); $('#tbTall').textContent = `${m(city.tallest.h)} m`;
   makeTags();
   if (fly) cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560);
@@ -78,7 +85,7 @@ function renderPanel() {
   const el = $('#panel');
   if (sel == null) { el.hidden = true; return; }
   const b = city.buildings[sel], w = b.box.x1 - b.box.x0, d = b.box.z1 - b.box.z0;
-  const dist = DISTRICTS[b.district].name;
+  const dist = districtName(b.district, city.cyber);
   const floors = Math.max(1, Math.round((b.h - 0.3) / FLOOR));
   el.hidden = false;
   el.innerHTML = `<div class="eyebrow"><i class="dot" style="background:var(--accent)"></i>Sheet NW-02 · ${esc(b.ref)}</div>
@@ -134,6 +141,15 @@ function closeModal() { $('#modal').hidden = true; }
 $('#modalClose').onclick = closeModal;
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
+function setStyle(theme) {
+  const wasNeon = S.theme === 'neon';
+  S.theme = theme; save();
+  document.documentElement.dataset.mode = STYLES[theme].mode;
+  world.setTheme(theme);
+  if (wasNeon !== (theme === 'neon')) build(seed, false); // the neon city is a denser, taller version of the same seed
+  else { $('#tbDrawing').textContent = STYLES[theme].drawing; $('#btnStyle').textContent = `Style: ${STYLES[theme].label}`; }
+}
+$('#btnStyle').onclick = () => { setStyle(ORDER[(ORDER.indexOf(S.theme) + 1) % ORDER.length]); toast(`${STYLES[S.theme].label} style.`); };
 $('#btnNew').onclick = () => { build(randomSeed()); toast(`Drew ${city.name}.`); };
 $('#btnOverview').onclick = () => cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560);
 $('#btnControls').onclick = () => modal(`<h2>Controls</h2><p class="muted">Modelled on Anno 1800, so one hand on the mouse does everything.</p><table>
@@ -144,18 +160,22 @@ $('#btnControls').onclick = () => modal(`<h2>Controls</h2><p class="muted">Model
   <tr><td>Right-click or <kbd>Esc</kbd></td><td>Deselect</td></tr>
   <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows</td><td>Pan</td></tr>
   <tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>Rotate</td></tr>
-  <tr><td>Screen edges</td><td>Pan, if turned on in Settings</td></tr></table>`);
+  <tr><td>Screen edges</td><td>Pan, if turned on in Settings</td></tr>
+  <tr><td>Style button</td><td>Switch between Draft, Night and Neon</td></tr></table>`);
 $('#btnSettings').onclick = () => {
   modal(`<h2>Settings</h2>
-    ${[['dark', 'Dark mode (night: the floor lines light up like windows)'], ['labels', 'Show district names'], ['calm', 'Calm mode: stop the traffic and drones'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
+    <div class="sub">Style</div>
+    ${ORDER.map(k => `<label class="opt"><input type="radio" name="style" data-style="${k}" ${S.theme === k ? 'checked' : ''}>${STYLES[k].label}: ${{ draft: 'white drafting sheet', night: 'the drafting sheet at night, floor lines lit like windows', neon: 'a taller, denser cyberpunk city with signs, skybridges, flying traffic and rain' }[k]}</label>`).join('')}
+    <div class="sub" style="margin-top:16px">View</div>
+    ${[['labels', 'Show district names'], ['calm', 'Calm mode: stop the traffic and drones'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
       .map(([k, l]) => `<label class="opt"><input type="checkbox" data-s="${k}" ${S[k] ? 'checked' : ''}>${l}</label>`).join('')}
     <div class="sub" style="margin-top:16px">Seed</div>
     <p class="muted" style="font-size:14px">Every city comes from a number. The same number always draws the same city, and the link in your address bar includes it, so you can share it.</p>
     <div class="actions"><input id="seedIn" class="field" inputmode="numeric" value="${seed}"><button class="btn primary" data-x="seed">Draw this seed</button></div>`);
   $('#modalBody').onchange = (e) => {
+    if (e.target.dataset.style) { setStyle(e.target.dataset.style); return; }
     const k = e.target.dataset.s; if (!k) return;
     S[k] = e.target.checked; save();
-    if (k === 'dark') { document.documentElement.dataset.mode = S.dark ? 'dark' : 'light'; world.setTheme(S.dark); }
   };
   $('#modalBody').onclick = (e) => {
     if (!e.target.closest('[data-x="seed"]')) return;
