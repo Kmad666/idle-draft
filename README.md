@@ -2,7 +2,7 @@
 
 A procedural city drawn on a white drafting table: glossy white buildings with ink outlines and floor lines, a hatched river, safety-orange accents, and traffic moving through the streets. Leave it open and watch it, or fly around and inspect buildings.
 
-The Anno-style economy from v0.1 is paused for now. It is kept in the git history under the tag `v0.1-anno`.
+The Anno-style economy from v0.1 is paused for now. It is kept on the `v0.1-anno` branch.
 
 ## Play
 
