@@ -9,7 +9,7 @@ const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt
 const m = (u) => Math.round(u * METRES);
 
 /* ---------- settings ---------- */
-let prefs = { settings: { theme: 'draft', edgeScroll: false, calm: false, labels: true }, seed: null };
+let prefs = { settings: { theme: 'draft', edgeScroll: false, calm: false, labels: true }, seed: null, delivered: 0 };
 try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); prefs = { ...prefs, ...p, settings: { ...prefs.settings, ...p.settings } }; } } catch { /* storage off */ }
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* storage off */ } };
 const S = prefs.settings;
@@ -29,7 +29,7 @@ let seed = Number.isFinite(urlSeed) ? urlSeed : prefs.seed || randomSeed();
 const world = new World($('#view'), S);
 const lim = HALF + 20;
 const cam = new AnnoCamera(world.camera, world.renderer.domElement, S, { min: 16, max: 900, dist: 560, yaw: -0.62, bounds: { minX: -lim, maxX: lim, minZ: -lim, maxZ: lim } });
-let city = null, sel = null, hov = null;
+let city = null, sel = null, hov = null, follow = null;
 window.idleDraft = { world, cam, get city() { return city; } }; // handy in the console
 
 function toast(msg) {
@@ -42,15 +42,30 @@ function build(newSeed, fly = true) {
   const u = new URL(location.href); u.searchParams.set('seed', seed); history.replaceState(null, '', u);
   city = generateCity(seed, { cyber: S.theme === 'neon' });
   world.build(city);
-  sel = hov = null; renderPanel();
-  $('#cityName').textContent = city.name;
-  $('#cityStats').textContent = `${city.buildings.length.toLocaleString('en-US')} buildings`;
+  sel = hov = null; follow = null; renderPanel(); followButton();
+  world.deliveries.onDeliver = () => { prefs.delivered = (prefs.delivered || 0) + 1; statsDirty = true; };
+  $('#cityName').textContent = city.name; updateStats();
   $('#tbCity').textContent = city.name; $('#tbSeed').textContent = seed; $('#tbDrawing').textContent = STYLES[S.theme].drawing;
   $('#btnStyle').textContent = `Style: ${STYLES[S.theme].label}`;
   $('#tbCount').textContent = city.buildings.length.toLocaleString('en-US'); $('#tbTall').textContent = `${m(city.tallest.h)} m`;
   makeTags();
   if (fly) cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560);
 }
+
+let statsDirty = false;
+function updateStats() {
+  $('#cityStats').textContent = `${city.buildings.length.toLocaleString('en-US')} buildings · ${(prefs.delivered || 0).toLocaleString('en-US')} delivered`;
+}
+setInterval(() => { if (statsDirty) { statsDirty = false; updateStats(); save(); } if (follow) renderPanel(); }, 400);
+
+/* ---------- following a drone ---------- */
+function setFollow(d) {
+  follow = d; world.deliveries.follow = d;
+  if (d) { sel = null; world.select(null); cam.goalDist = Math.min(cam.goalDist, 75); }
+  renderPanel(); followButton();
+}
+function followButton() { $('#btnFollow').textContent = follow ? 'Stop following' : 'Follow a drone'; $('#btnFollow').classList.toggle('on', !!follow); }
+$('#btnFollow').onclick = () => setFollow(follow ? null : world.deliveries.busiest());
 
 /* ---------- district labels and the dimension tag ---------- */
 let tagEls = [];
@@ -83,6 +98,7 @@ function placeTags() {
 /* ---------- spec panel ---------- */
 function renderPanel() {
   const el = $('#panel');
+  if (follow) return renderDronePanel(el);
   if (sel == null) { el.hidden = true; return; }
   const b = city.buildings[sel], w = b.box.x1 - b.box.x0, d = b.box.z1 - b.box.z0;
   const dist = districtName(b.district, city.cyber);
@@ -90,7 +106,7 @@ function renderPanel() {
   el.hidden = false;
   el.innerHTML = `<div class="eyebrow"><i class="dot" style="background:var(--accent)"></i>Sheet NW-02 · ${esc(b.ref)}</div>
     <h2>${esc(b.type)}</h2>
-    <p class="desc">${b.landmark ? `The tallest tower in ${esc(city.name)}, marked by the ring and spire at the top.` : `${esc(dist)}, ${esc(city.name)}.`}</p>
+    <p class="desc">${b.depot ? `Home base for ${b.slots.length} delivery drones. They load here, fly out over the roofs, and come back for the next package.` : b.landmark ? `The tallest tower in ${esc(city.name)}, marked by the ring and spire at the top.` : `${esc(dist)}, ${esc(city.name)}.`}</p>
     <dl class="spec">
       <dt>Height</dt><dd>${m(b.h)} m</dd>
       <dt>Storeys</dt><dd>${floors}</dd>
@@ -106,33 +122,59 @@ function renderPanel() {
   };
 }
 
+function renderDronePanel(el) {
+  const d = follow, i = world.deliveries.info(d);
+  el.hidden = false;
+  el.innerHTML = `<div class="eyebrow"><i class="dot" style="background:var(--accent)"></i>Delivery drone · following</div>
+    <h2>Drone ${esc(d.name)}</h2>
+    <p class="desc">${esc(i.status)}.</p>
+    <dl class="spec">
+      <dt>Delivering to</dt><dd>${i.to ? `${esc(i.to.ref)}, ${esc(i.to.type.toLowerCase())}` : '—'}</dd>
+      <dt>Distance left</dt><dd>${i.left ? `${i.left.toLocaleString('en-US')} m` : '—'}</dd>
+      <dt>Altitude</dt><dd>${i.alt} m</dd>
+      <dt>Base</dt><dd>${esc(d.depot.ref)}</dd>
+      <dt>Deliveries</dt><dd>${i.trips}</dd>
+    </dl>
+    <div class="actions"><button class="btn" data-a="next">Another drone</button><button class="btn" data-a="stop">Stop following</button></div>`;
+  el.onclick = (e) => {
+    const a = e.target.closest('[data-a]'); if (!a) return;
+    if (a.dataset.a === 'next') { let n; do n = world.deliveries.busiest(); while (n === follow && world.deliveries.drones.length > 1); setFollow(n); }
+    if (a.dataset.a === 'stop') setFollow(null);
+  };
+}
+
 /* ---------- pointer input (Anno style) ---------- */
 const dom = world.renderer.domElement;
 let down = null;
 dom.addEventListener('contextmenu', e => e.preventDefault());
 dom.addEventListener('pointerdown', e => {
   if (e.button === 0) { down = { x: e.clientX, y: e.clientY, panning: false }; dom.setPointerCapture(e.pointerId); }
-  if (e.button === 2) { sel = null; world.select(null); renderPanel(); }
+  if (e.button === 2) { sel = null; world.select(null); setFollow(null); }
 });
 dom.addEventListener('pointermove', e => {
-  if (down && !down.panning && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.panning = true; cam.startPan(e); }
+  if (down && !down.panning && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.panning = true; if (follow) { setFollow(null); cam.target.y = 0; } cam.startPan(e); }
   if (down && down.panning) { dom.style.cursor = 'grabbing'; return; }
   if (!city) return;
-  const h = world.pick(e.clientX, e.clientY);
+  const overDrone = world.deliveries.pickScreen(e.clientX, e.clientY);
+  const h = overDrone ? null : world.pick(e.clientX, e.clientY);
   if (h !== hov) { hov = h; world.hover(h); }
-  dom.style.cursor = hov != null ? 'pointer' : 'grab';
+  dom.style.cursor = overDrone || hov != null ? 'pointer' : 'grab';
 });
 dom.addEventListener('pointerleave', () => { hov = null; world.hover(null); });
 dom.addEventListener('pointerup', e => {
   if (e.button !== 0 || !down) return;
   const wasPan = down.panning; down = null; cam.endPan();
   if (wasPan) return;
+  const dr = world.deliveries.pickScreen(e.clientX, e.clientY);
+  if (dr) { setFollow(dr); return; }
+  if (follow) setFollow(null);
   sel = world.pick(e.clientX, e.clientY);
   world.select(sel); world.hover(null); renderPanel();
 });
 addEventListener('keydown', e => {
   if (e.target.closest && e.target.closest('input,textarea')) return;
-  if (e.key === 'Escape') { if (!$('#modal').hidden) closeModal(); else { sel = null; world.select(null); renderPanel(); } }
+  if (e.key === 'Escape') { if (!$('#modal').hidden) closeModal(); else { sel = null; world.select(null); setFollow(null); } }
+  if (follow && ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(e.key.toLowerCase())) setFollow(null);
 });
 
 /* ---------- HUD and modals ---------- */
@@ -157,7 +199,8 @@ $('#btnControls').onclick = () => modal(`<h2>Controls</h2><p class="muted">Model
   <tr><td>Left-drag</td><td>Pan the map</td></tr>
   <tr><td>Mouse wheel</td><td>Zoom. The camera tilts lower as you zoom in</td></tr>
   <tr><td>Middle-drag</td><td>Rotate the view</td></tr>
-  <tr><td>Right-click or <kbd>Esc</kbd></td><td>Deselect</td></tr>
+  <tr><td>Click a drone</td><td>Follow it on its delivery. Drag the map to stop following</td></tr>
+  <tr><td>Right-click or <kbd>Esc</kbd></td><td>Deselect, or stop following</td></tr>
   <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows</td><td>Pan</td></tr>
   <tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>Rotate</td></tr>
   <tr><td>Screen edges</td><td>Pan, if turned on in Settings</td></tr>
@@ -167,7 +210,7 @@ $('#btnSettings').onclick = () => {
     <div class="sub">Style</div>
     ${ORDER.map(k => `<label class="opt"><input type="radio" name="style" data-style="${k}" ${S.theme === k ? 'checked' : ''}>${STYLES[k].label}: ${{ draft: 'white drafting sheet', night: 'the drafting sheet at night, floor lines lit like windows', neon: 'a taller, denser cyberpunk city with signs, skybridges, flying traffic and rain' }[k]}</label>`).join('')}
     <div class="sub" style="margin-top:16px">View</div>
-    ${[['labels', 'Show district names'], ['calm', 'Calm mode: stop the traffic and drones'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
+    ${[['labels', 'Show district names'], ['calm', 'Calm mode: pause the traffic, drones and rain'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
       .map(([k, l]) => `<label class="opt"><input type="checkbox" data-s="${k}" ${S[k] ? 'checked' : ''}>${l}</label>`).join('')}
     <div class="sub" style="margin-top:16px">Seed</div>
     <p class="muted" style="font-size:14px">Every city comes from a number. The same number always draws the same city, and the link in your address bar includes it, so you can share it.</p>
@@ -207,6 +250,10 @@ $('#boot').remove();
 let prev = performance.now(), metaT = 0;
 function frame(now) {
   const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
+  if (follow) { // the camera glides after the drone
+    const k = Math.min(1, dt * 4), p = follow.pos;
+    cam.target.x += (p.x - cam.target.x) * k; cam.target.z += (p.z - cam.target.z) * k; cam.target.y += (p.y * 0.85 - cam.target.y) * k;
+  } else if (cam.target.y) cam.target.y += (0 - cam.target.y) * Math.min(1, dt * 3);
   cam.update(dt);
   world.frame(dt, now / 1000, cam, S.calm);
   placeTags();

@@ -59,7 +59,7 @@ p { margin: 0 0 10px; }
 .money b { font: 600 28px/1 var(--display); }
 .money small { font: 500 14px var(--mono); color: var(--good); }
 .hud-btns { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-#btnPulse.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+#btnFollow.on, #btnPulse.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 
 /* spec panel */
 #panel { position: fixed; top: 80px; right: 12px; width: 330px; max-height: calc(100vh - 290px); overflow: auto; padding: 14px 16px; z-index: 2; }

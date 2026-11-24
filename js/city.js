@@ -43,6 +43,7 @@ export const DISTRICTS = {
   park: { name: 'Park', code: 'PK' },
   arco: { name: 'Arcology', code: 'AR' },
 };
+export const blockOf = (x, z) => [Math.floor((x + HALF) / PITCH), Math.floor((z + HALF) / PITCH)];
 const CYBER_NAMES = { civic: 'Spire District', core: 'Spire District', mid: 'Neon Mile', res: 'The Stacks', works: 'Dock Works', park: 'Green Vault', arco: 'Arcology' };
 export const districtName = (k, cyber) => (cyber ? CYBER_NAMES[k] : DISTRICTS[k].name);
 export const NEON_COLOURS = 4; // magenta, cyan, amber, lime
@@ -246,6 +247,20 @@ function arcology(r, block) {
   return { type: 'Arcology', parts };
 }
 
+// Drone depot: a low hall with a landing deck and parking spots on the roof.
+function depot(r, lot) {
+  const q = inset(lot, 0.8), { w, d, x, z } = dims(q), parts = [];
+  const H = range(r, 6, 9), top = KERB + H;
+  parts.push({ s: 'box', m: 'white', x, z, y: KERB, w, d, h: H, fl: true });
+  parts.push({ s: 'box', m: 'steel', x, z, y: top, w: w - 0.6, d: d - 0.6, h: 0.3 });
+  parts.push({ s: 'box', m: 'accent', x, z, y: top - 1.2, w: w + 0.25, d: d + 0.25, h: 0.4 });
+  parts.push({ s: 'cyl', m: 'steel', x: x - w / 2 + 0.8, z: z - d / 2 + 0.8, y: top, r: 0.12, h: 6, seg: 6 });
+  parts.push({ s: 'sph', m: 'beacon', x: x - w / 2 + 0.8, z: z - d / 2 + 0.8, y: top + 6, r: 0.35 });
+  const slots = [], gap = 2.8, deck = top + 0.3;
+  for (let gx = -w / 2 + 2; gx <= w / 2 - 1.6; gx += gap) for (let gz = -d / 2 + 2; gz <= d / 2 - 1.6; gz += gap) slots.push([x + gx, deck, z + gz]);
+  return { type: 'Drone depot', parts, slots: slots.slice(0, 12), deck };
+}
+
 function rotunda(r, block) {
   const { x, z } = dims(block), parts = [];
   parts.push({ s: 'cyl', m: 'white', x, z, y: KERB, r: 10.6, h: 0.8, seg: 48 });
@@ -352,9 +367,34 @@ export function generateCity(seed, opts = {}) {
     best.h = best.box.y1;
   }
 
+  // Three drone depots spread around the city, one in each third of the circle around the centre.
+  const depots = [];
+  for (let k = 0; k < 3; k++) {
+    const a0 = k / 3 * Math.PI * 2 + r() * 0.6;
+    let pickB = null, bs = Infinity;
+    for (const b of blocks) {
+      if (!['mid', 'res', 'works'].includes(b.kind) || b.d < 0.25 || b.d > 0.6) continue;
+      const a = Math.atan2(b.cz - C.z, b.cx - C.x), da = Math.abs(Math.atan2(Math.sin(a - a0), Math.cos(a - a0)));
+      const sc = da + Math.abs(b.d - 0.4);
+      if (sc < bs && !depots.some(d => d.block === b)) { bs = sc; pickB = b; }
+    }
+    if (!pickB) continue;
+    const rect = { x0: pickB.x0, z0: pickB.z0, x1: pickB.x1, z1: pickB.z1 };
+    // clear the block's middle and put the depot there
+    const lot = inset(rect, 4);
+    for (let i = buildings.length - 1; i >= 0; i--) {
+      const bb = buildings[i].box;
+      if (bb.x1 > lot.x0 && bb.x0 < lot.x1 && bb.z1 > lot.z0 && bb.z0 < lot.z1) buildings.splice(i, 1);
+    }
+    const dp = depot(r, lot);
+    const bd = { id: ++nextId, district: pickB.kind, lot, box: bounds(dp.parts), ...dp, depot: true };
+    bd.h = bd.box.y1; buildings.push(bd);
+    depots.push({ block: pickB, building: bd });
+  }
+
   // Names: district code and a running number, like a drawing register.
   const counts = {};
-  for (const bd of buildings) { const c = DISTRICTS[bd.district].code; counts[c] = (counts[c] || 0) + 1; bd.ref = `${c}-${String(counts[c]).padStart(3, '0')}`; }
+  for (const bd of buildings) { const c = bd.depot ? 'DP' : DISTRICTS[bd.district].code; counts[c] = (counts[c] || 0) + 1; bd.ref = `${c}-${String(counts[c]).padStart(3, '0')}`; }
 
   // Labels for the districts.
   const labels = [];
@@ -378,7 +418,7 @@ export function generateCity(seed, opts = {}) {
   for (const b of blocks.filter(b => b.kind === 'arco')) labels.push({ text: 'Arcology', x: b.cx, z: b.cz + BLOCK * 0.7 });
 
   const tallest = buildings.reduce((a, b) => (b.h > a.h ? b : a), buildings[0]);
-  const city = { seed, cyber: cy, name, river, C, civic, blocks, buildings, trees, ponds, labels, tallest };
+  const city = { seed, cyber: cy, name, river, C, civic, blocks, buildings, trees, ponds, labels, tallest, depots: depots.map(d => d.building) };
   if (cy) addCyber(r, city);
   return city;
 }
@@ -396,6 +436,7 @@ function addCyber(r, city) {
 
   for (const b of buildings) {
     // pods and shacks bolted onto the sides of busy buildings
+    if (b.depot) continue;
     if ((b.district === 'mid' || b.district === 'res' || b.district === 'core') && b.h > 8 && r() < 0.55) {
       const n = 1 + Math.floor(r() * 3);
       for (let k = 0; k < n; k++) {

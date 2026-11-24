@@ -8,6 +8,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { Deliveries } from './drones.js';
 import { N, HALF, PITCH, ROAD, BLOCK, RIVER_ROW, KERB, FLOOR, roadLine, blockRect, rng, NEON_COLOURS } from './city.js';
 
 const THEMES = {
@@ -147,7 +148,7 @@ export class World {
       const [r, g, b] = NEON[c], hot = new THREE.Color(r * 1.7, g * 1.7, b * 1.7);
       this.signMats.solid.push(new THREE.MeshBasicMaterial({ color: hot, side: THREE.DoubleSide }));
       for (const k of ['strip', 'board']) this.signMats[k].push(new THREE.MeshBasicMaterial({ map: glyphTexture(NEON[c], k === 'strip', 99 + c * 7 + (k === 'strip' ? 0 : 3)),
-        color: new THREE.Color(1.5, 1.5, 1.5), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
+        color: new THREE.Color(1.2, 1.2, 1.2), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
     }
     this.glowMat = new THREE.LineBasicMaterial({ color: new THREE.Color(0.4, 2.2, 2.8), transparent: true, opacity: 0.9 });
     this.glowMat2 = new THREE.LineBasicMaterial({ color: new THREE.Color(2.6, 0.4, 2.0), transparent: true, opacity: 0.9 });
@@ -369,13 +370,7 @@ export class World {
       : col.set(palette[Math.floor(r() * palette.length)])));
     this.cityGroup.add(this.carMesh);
 
-    /* survey drones circling the tall towers */
-    const tall = [...city.buildings].sort((a, b) => b.h - a.h).slice(0, 10);
-    this.drones = tall.flatMap((b, i) => [0, 1].map(k => ({ x: (b.box.x0 + b.box.x1) / 2, z: (b.box.z0 + b.box.z1) / 2,
-      y: b.h * (0.55 + k * 0.3), rad: Math.max(b.box.x1 - b.box.x0, b.box.z1 - b.box.z0) * 0.8 + 4, a: r() * 6.28, w: (0.25 + r() * 0.2) * (k ? -1 : 1) })));
-    this.droneMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.45, 12, 8), this.mats.beacon, this.drones.length);
-    this.droneMesh.frustumCulled = false;
-    this.cityGroup.add(this.droneMesh);
+    this.deliveries = new Deliveries(this, city);
 
     if (city.cyber) this.buildCyber(city, M, r, seg);
 
@@ -546,15 +541,7 @@ export class World {
         });
         this.carMesh.instanceMatrix.needsUpdate = true;
       }
-      this.droneMesh.visible = !calm;
-      if (!calm) {
-        this.drones.forEach((d, i) => {
-          d.a += d.w * dt;
-          this.tmpM.makeTranslation(d.x + Math.cos(d.a) * d.rad, d.y + Math.sin(t * 0.7 + i) * 1.2, d.z + Math.sin(d.a) * d.rad);
-          this.droneMesh.setMatrixAt(i, this.tmpM);
-        });
-        this.droneMesh.instanceMatrix.needsUpdate = true;
-      }
+      this.deliveries.update(dt, t, calm);
       for (const s of this.spinners) if (!calm) s.rotation.z += dt * s.userData.speed;
       if (this.mats.beacon.emissive) this.mats.beacon.emissiveIntensity = this.t.beacon * (0.55 + 0.45 * Math.max(0, Math.sin(t * 2.2)));
       else this.mats.beacon.color.setRGB(3 * (0.3 + 0.7 * Math.max(0, Math.sin(t * 2.2))), 0.25, 0.35);
@@ -569,7 +556,7 @@ export class World {
     // signs scroll, and now and then one flickers
     for (const k of ['strip', 'board']) this.signMats[k].forEach((m, i) => {
       if (!calm) { if (k === 'strip') m.map.offset.y = (m.map.offset.y + dt * (0.04 + i * 0.012)) % 1; else m.map.offset.x = (m.map.offset.x + dt * (0.03 + i * 0.01)) % 1; }
-      const f = Math.sin(t * 23 + i * 7) > 0.97 ? 0.35 : 1; m.color.setScalar(1.5 * f);
+      const f = Math.sin(t * 23 + i * 7) > 0.97 ? 0.35 : 1; m.color.setScalar(1.2 * f);
     });
     this.signMats.solid.forEach((m, i) => { const [r, g, b] = NEON[i], f = (Math.sin(t * 17 + i * 3) > 0.985 ? 0.3 : 1) * 1.7; m.color.setRGB(r * f, g * f, b * f); });
     cy.flyMesh.visible = cy.trainMesh.visible = cy.rain.visible = !calm;
