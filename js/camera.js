@@ -3,18 +3,19 @@
 import * as THREE from 'three';
 
 export class AnnoCamera {
-  constructor(camera, dom, settings) {
+  constructor(camera, dom, settings, o = {}) {
     this.cam = camera; this.dom = dom; this.settings = settings;
-    this.target = new THREE.Vector3(14, 0, -2);
-    this.yaw = -0.35; this.dist = 92; this.goalDist = 92; this.goalYaw = this.yaw;
+    this.min = o.min ?? 14; this.max = o.max ?? 130;
+    this.target = new THREE.Vector3(o.x ?? 0, 0, o.z ?? 0);
+    this.yaw = o.yaw ?? -0.35; this.dist = o.dist ?? 92; this.goalDist = this.dist; this.goalYaw = this.yaw;
     this.keys = new Set(); this.mouse = null; this.panning = null; this.rotating = null;
     this.plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
     this.ray = new THREE.Raycaster();
-    this.bounds = { minX: -30, maxX: 80, minZ: -40, maxZ: 35 };
+    this.bounds = o.bounds ?? { minX: -30, maxX: 80, minZ: -40, maxZ: 35 };
 
     dom.addEventListener('wheel', e => {
       e.preventDefault();
-      this.goalDist = THREE.MathUtils.clamp(this.goalDist * Math.pow(1.0015, e.deltaY), 14, 130);
+      this.goalDist = THREE.MathUtils.clamp(this.goalDist * Math.pow(1.0015, e.deltaY), this.min, this.max);
     }, { passive: false });
     addEventListener('keydown', e => {
       if (e.target.closest && e.target.closest('input,textarea')) return;
@@ -36,7 +37,7 @@ export class AnnoCamera {
   }
 
   pitch() { // zoomed in = low angle, zoomed out = high
-    const t = (this.dist - 14) / (130 - 14);
+    const t = (this.dist - this.min) / (this.max - this.min);
     return THREE.MathUtils.lerp(0.42, 1.12, Math.sqrt(Math.max(0, t)));
   }
 
@@ -95,5 +96,5 @@ export class AnnoCamera {
     this.cam.lookAt(this.target);
   }
 
-  focus(x, z) { this.target.set(x, 0, z); this.clamp(); }
+  focus(x, z, dist) { this.target.set(x, 0, z); this.clamp(); if (dist) this.goalDist = THREE.MathUtils.clamp(dist, this.min, this.max); }
 }

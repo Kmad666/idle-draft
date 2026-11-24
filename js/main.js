@@ -1,75 +1,102 @@
-// Wiring: input, game loop, saving, away progress.
+// Wiring: city generation, camera, input, panels, labels and settings.
 import { World } from './world.js';
 import { AnnoCamera } from './camera.js';
-import * as S from './sim.js';
-import * as UI from './ui.js';
-import { BUILDINGS, ISLANDS, AWAY_CAP } from './data.js';
+import { generateCity, HALF, METRES, FLOOR, DISTRICTS } from './city.js';
 
-const KEY = 'idle-draft-save-v1';
+const KEY = 'idle-draft-city-v1';
 const $ = (q) => document.querySelector(q);
+const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const m = (u) => Math.round(u * METRES);
 
-/* ---------- save / load ---------- */
-function serialize(s) {
-  return JSON.stringify({
-    v: 1, bits: s.bits, lifetime: s.lifetime, time: s.time, islands: s.islands, relayLanes: s.relayLanes, pulse: s.pulse,
-    tutorial: s.tutorial, tutorialHidden: s.tutorialHidden, tutorialMin: s.tutorialMin, settings: s.settings, savedAt: Date.now(),
-    buildings: s.buildings.map(b => ({ id: b.id, type: b.type, island: b.island, cx: b.cx, cz: b.cz, tier: b.tier || 0, spent: b.spent || 0,
-      buf: b.buf, out: b.out, met: b.met, readyT: b.readyT, coreMet: b.coreMet })),
-    links: s.links.map(l => ({ id: l.id, from: l.from, to: l.to, good: l.good })),
-  });
-}
-function load() {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return S.restore({ ...S.newState(), ...JSON.parse(raw) });
-  } catch (e) { console.warn('Save could not be read', e); }
-  return S.newState();
-}
-function save() { try { s.savedAt = Date.now(); localStorage.setItem(KEY, serialize(s)); } catch (e) { /* storage unavailable */ } }
-const encode = (str) => btoa(unescape(encodeURIComponent(str)));
-const decode = (str) => decodeURIComponent(escape(atob(str.trim())));
+/* ---------- settings ---------- */
+let prefs = { settings: { dark: false, edgeScroll: false, calm: false, labels: true }, seed: null };
+try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); prefs = { ...prefs, ...p, settings: { ...prefs.settings, ...p.settings } }; } } catch { /* storage off */ }
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* storage off */ } };
+const S = prefs.settings;
+document.documentElement.dataset.mode = S.dark ? 'dark' : 'light';
 
-let s = load();
-window.idleDraft = s; // handy for debugging in the console
-document.documentElement.dataset.mode = s.settings.dark ? 'dark' : 'light';
-
-/* ---------- away progress ---------- */
-let away = null;
-const gone = (Date.now() - (s.savedAt || Date.now())) / 1000;
-if (s.buildings.length > 1 && gone > 60) {
-  const secs = Math.min(gone, AWAY_CAP);
-  away = { ...S.fastForward(s, secs), capped: gone > AWAY_CAP };
-}
+const urlSeed = parseInt(new URLSearchParams(location.search).get('seed'), 10);
+const randomSeed = () => Math.floor(Math.random() * 999999) + 1;
+let seed = Number.isFinite(urlSeed) ? urlSeed : prefs.seed || randomSeed();
 
 /* ---------- view ---------- */
-const world = new World($('#view'), s);
-const cam = new AnnoCamera(world.camera, world.renderer.domElement, s.settings);
-const tags = new UI.Tags(world, s, (k) => { const err = S.unlockIsland(s, k); if (err) UI.toast(err); else { UI.toast(`${ISLANDS[k].name} is open.`); cam.focus(ISLANDS[k].cx - 10, ISLANDS[k].cz); save(); } });
-$('#boot').remove();
+const world = new World($('#view'), S);
+const lim = HALF + 20;
+const cam = new AnnoCamera(world.camera, world.renderer.domElement, S, { min: 16, max: 900, dist: 560, yaw: -0.62, bounds: { minX: -lim, maxX: lim, minZ: -lim, maxZ: lim } });
+let city = null, sel = null, hov = null;
+window.idleDraft = { world, cam, get city() { return city; } }; // handy in the console
 
-let sel = null, hover = null, mode = null; // mode: {kind:'place',type} | {kind:'move',id} | {kind:'link',id}
-const setMode = (m) => {
-  mode = m; world.setGhost(m && m.kind === 'place' ? m.type : m && m.kind === 'move' ? S.byId(s, m.id).type : null, null, true);
-  const bar = $('#modeBar');
-  if (!m) { bar.hidden = true; return; }
-  bar.hidden = false;
-  bar.innerHTML = m.kind === 'place' ? `Building <b>${BUILDINGS[m.type].name}</b>: left-click a square, <b>F</b> for the suggested spot, right-click to stop.`
-    : m.kind === 'move' ? 'Moving: left-click an empty square. Right-click cancels.'
-    : `Linking from <b>${S.label(S.byId(s, m.id))}</b>: left-click the other building. Right-click cancels.`;
-};
-
-function placeAt(cell) {
-  if (!cell) return;
-  const r = S.place(s, mode.type, cell.island, cell.cx, cell.cz);
-  if (r.err) UI.toast(r.err); else { if (s.bits < S.costOf(s, mode.type)) setMode(null); }
+function toast(msg) {
+  const t = document.createElement('div'); t.className = 'toast'; t.textContent = msg;
+  $('#toasts').appendChild(t); setTimeout(() => t.remove(), 2600);
 }
 
-UI.renderDock(s, mode, pick);
-function pick(type) {
-  if (!S.isUnlocked(s, type)) { UI.toast('Unlock Thera first.'); return; }
-  if (mode && mode.type === type) { setMode(null); return; }
-  setMode({ kind: 'place', type });
-  const c = S.suggestCell(s, type); if (c) world.setGhost(type, c, true);
+function build(newSeed, fly = true) {
+  seed = newSeed; prefs.seed = seed; save();
+  const u = new URL(location.href); u.searchParams.set('seed', seed); history.replaceState(null, '', u);
+  city = generateCity(seed);
+  world.build(city);
+  sel = hov = null; renderPanel();
+  $('#cityName').textContent = city.name;
+  $('#cityStats').textContent = `${city.buildings.length.toLocaleString('en-US')} buildings`;
+  $('#tbCity').textContent = city.name; $('#tbSeed').textContent = seed;
+  $('#tbCount').textContent = city.buildings.length.toLocaleString('en-US'); $('#tbTall').textContent = `${m(city.tallest.h)} m`;
+  makeTags();
+  if (fly) cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560);
+}
+
+/* ---------- district labels and the dimension tag ---------- */
+let tagEls = [];
+function makeTags() {
+  const box = $('#tags'); box.innerHTML = '';
+  tagEls = city.labels.map(l => {
+    const el = document.createElement('div'); el.className = 'tag isl' + (l.river ? ' river' : ''); el.textContent = l.text;
+    box.appendChild(el); return { el, l };
+  });
+  const d = document.createElement('div'); d.className = 'tag dim'; d.hidden = true; box.appendChild(d);
+  tagEls.dim = d;
+}
+function placeTags() {
+  const showLabels = S.labels && cam.dist > 70;
+  for (const { el, l } of tagEls) {
+    if (!showLabels) { el.style.display = 'none'; continue; }
+    const p = world.project(l.x, 2, l.z);
+    el.style.display = p.behind ? 'none' : '';
+    el.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -50%)`;
+  }
+  const d = tagEls.dim;
+  if (d) {
+    if (sel == null || !world.dimAt) { d.hidden = true; return; }
+    const b = city.buildings[sel], p = world.project(world.dimAt.x, world.dimAt.y, world.dimAt.z);
+    d.hidden = p.behind; d.textContent = `${m(b.h)} m`;
+    d.style.transform = `translate(${p.x + 8}px, ${p.y}px) translate(0, -50%)`;
+  }
+}
+
+/* ---------- spec panel ---------- */
+function renderPanel() {
+  const el = $('#panel');
+  if (sel == null) { el.hidden = true; return; }
+  const b = city.buildings[sel], w = b.box.x1 - b.box.x0, d = b.box.z1 - b.box.z0;
+  const dist = DISTRICTS[b.district].name;
+  const floors = Math.max(1, Math.round((b.h - 0.3) / FLOOR));
+  el.hidden = false;
+  el.innerHTML = `<div class="eyebrow"><i class="dot" style="background:var(--accent)"></i>Sheet NW-02 · ${esc(b.ref)}</div>
+    <h2>${esc(b.type)}</h2>
+    <p class="desc">${b.landmark ? `The tallest tower in ${esc(city.name)}, marked by the ring and spire at the top.` : `${esc(dist)}, ${esc(city.name)}.`}</p>
+    <dl class="spec">
+      <dt>Height</dt><dd>${m(b.h)} m</dd>
+      <dt>Storeys</dt><dd>${floors}</dd>
+      <dt>Footprint</dt><dd>${m(w)} × ${m(d)} m</dd>
+      <dt>District</dt><dd>${esc(dist)}</dd>
+      <dt>Grid ref</dt><dd>${Math.round((b.box.x0 + b.box.x1) / 2 * METRES)}, ${Math.round((b.box.z0 + b.box.z1) / 2 * METRES)}</dd>
+    </dl>
+    <div class="actions"><button class="btn" data-a="focus">Zoom to it</button><button class="btn" data-a="close">Close</button></div>`;
+  el.onclick = (e) => {
+    const a = e.target.closest('[data-a]'); if (!a) return;
+    if (a.dataset.a === 'focus') cam.focus((b.box.x0 + b.box.x1) / 2, (b.box.z0 + b.box.z1) / 2, Math.max(40, b.h * 1.3));
+    if (a.dataset.a === 'close') { sel = null; world.select(null); renderPanel(); }
+  };
 }
 
 /* ---------- pointer input (Anno style) ---------- */
@@ -78,121 +105,92 @@ let down = null;
 dom.addEventListener('contextmenu', e => e.preventDefault());
 dom.addEventListener('pointerdown', e => {
   if (e.button === 0) { down = { x: e.clientX, y: e.clientY, panning: false }; dom.setPointerCapture(e.pointerId); }
-  if (e.button === 2) { if (mode) setMode(null); else sel = null; }
+  if (e.button === 2) { sel = null; world.select(null); renderPanel(); }
 });
 dom.addEventListener('pointermove', e => {
   if (down && !down.panning && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.panning = true; cam.startPan(e); }
-  if (down && down.panning) return;
-  hover = world.pickBuilding(e.clientX, e.clientY);
-  if (mode && mode.kind !== 'link') {
-    const c = world.pickCell(e.clientX, e.clientY);
-    const type = mode.kind === 'place' ? mode.type : S.byId(s, mode.id).type;
-    const ok = c && S.cellFree(s, c.island, c.cx, c.cz) && !S.canPlace(s, type, c.island);
-    world.setGhost(type, c, ok);
-  }
-  dom.style.cursor = mode ? 'crosshair' : hover ? 'pointer' : 'grab';
+  if (down && down.panning) { dom.style.cursor = 'grabbing'; return; }
+  if (!city) return;
+  const h = world.pick(e.clientX, e.clientY);
+  if (h !== hov) { hov = h; world.hover(h); }
+  dom.style.cursor = hov != null ? 'pointer' : 'grab';
 });
+dom.addEventListener('pointerleave', () => { hov = null; world.hover(null); });
 dom.addEventListener('pointerup', e => {
   if (e.button !== 0 || !down) return;
   const wasPan = down.panning; down = null; cam.endPan();
   if (wasPan) return;
-  if (mode && mode.kind === 'place') return placeAt(world.pickCell(e.clientX, e.clientY));
-  if (mode && mode.kind === 'move') {
-    const c = world.pickCell(e.clientX, e.clientY), b = S.byId(s, mode.id);
-    if (c) { const err = S.move(s, b, c.island, c.cx, c.cz); if (err) UI.toast(err); else setMode(null); }
-    return;
-  }
-  const id = world.pickBuilding(e.clientX, e.clientY);
-  if (mode && mode.kind === 'link') {
-    if (!id) return;
-    const a = S.byId(s, mode.id), b = S.byId(s, id);
-    const err1 = S.canLink(s, a, b), err2 = S.canLink(s, b, a);
-    if (!err1) S.addLink(s, a, b); else if (!err2) S.addLink(s, b, a); else { UI.toast(err1); return; }
-    UI.toast('Linked.'); setMode(null); return;
-  }
-  sel = id;
+  sel = world.pick(e.clientX, e.clientY);
+  world.select(sel); world.hover(null); renderPanel();
 });
 addEventListener('keydown', e => {
   if (e.target.closest && e.target.closest('input,textarea')) return;
-  if (e.key === 'Escape') { if (!$('#modal').hidden) UI.closeModal(); else if (mode) setMode(null); else sel = null; }
-  if (e.key.toLowerCase() === 'f' && mode && mode.kind === 'place') placeAt(S.suggestCell(s, mode.type));
+  if (e.key === 'Escape') { if (!$('#modal').hidden) closeModal(); else { sel = null; world.select(null); renderPanel(); } }
 });
 
-/* ---------- panel actions ---------- */
-function act(a, b, linkId) {
-  if (a === 'pulse') doPulse();
-  if (a === 'lane') { const err = S.buyLane(s, S.laneCost(s)); UI.toast(err || 'Relay lane added.'); }
-  if (a === 'upgrade') { const err = S.upgrade(s, b); UI.toast(err || `Upgraded to ${S.tierOf(b).name}.`); }
-  if (a === 'move') setMode({ kind: 'move', id: b.id });
-  if (a === 'link') setMode({ kind: 'link', id: b.id });
-  if (a === 'unlink') S.removeLink(s, +linkId);
-  if (a === 'demolish') { S.demolish(s, b); sel = null; }
-  save();
-}
-function doPulse() {
-  const wait = S.pulse(s);
-  UI.toast(wait ? `Pulse is recharging: ${wait}s.` : 'Pulse! Everything runs twice as fast for 10 seconds.');
-}
+/* ---------- HUD and modals ---------- */
+function modal(html) { $('#modalBody').innerHTML = html; $('#modal').hidden = false; $('#modalClose').focus(); }
+function closeModal() { $('#modal').hidden = true; }
+$('#modalClose').onclick = closeModal;
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
-/* ---------- HUD buttons and modals ---------- */
-$('#btnPulse').onclick = doPulse;
-$('#btnGuide').onclick = () => UI.modal(UI.glossaryHtml());
-$('#btnControls').onclick = () => UI.modal(UI.controlsHtml());
-$('#modalClose').onclick = UI.closeModal;
-$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') UI.closeModal(); });
+$('#btnNew').onclick = () => { build(randomSeed()); toast(`Drew ${city.name}.`); };
+$('#btnOverview').onclick = () => cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560);
+$('#btnControls').onclick = () => modal(`<h2>Controls</h2><p class="muted">Modelled on Anno 1800, so one hand on the mouse does everything.</p><table>
+  <tr><td>Left-click</td><td>Select a building and see its spec sheet</td></tr>
+  <tr><td>Left-drag</td><td>Pan the map</td></tr>
+  <tr><td>Mouse wheel</td><td>Zoom. The camera tilts lower as you zoom in</td></tr>
+  <tr><td>Middle-drag</td><td>Rotate the view</td></tr>
+  <tr><td>Right-click or <kbd>Esc</kbd></td><td>Deselect</td></tr>
+  <tr><td><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> or arrows</td><td>Pan</td></tr>
+  <tr><td><kbd>Q</kbd> <kbd>E</kbd></td><td>Rotate</td></tr>
+  <tr><td>Screen edges</td><td>Pan, if turned on in Settings</td></tr></table>`);
 $('#btnSettings').onclick = () => {
-  UI.modal(UI.settingsHtml(s));
-  $('#saveText').value = encode(serialize(s));
-  let armed = false;
+  modal(`<h2>Settings</h2>
+    ${[['dark', 'Dark mode (night: the floor lines light up like windows)'], ['labels', 'Show district names'], ['calm', 'Calm mode: stop the traffic and drones'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
+      .map(([k, l]) => `<label class="opt"><input type="checkbox" data-s="${k}" ${S[k] ? 'checked' : ''}>${l}</label>`).join('')}
+    <div class="sub" style="margin-top:16px">Seed</div>
+    <p class="muted" style="font-size:14px">Every city comes from a number. The same number always draws the same city, and the link in your address bar includes it, so you can share it.</p>
+    <div class="actions"><input id="seedIn" class="field" inputmode="numeric" value="${seed}"><button class="btn primary" data-x="seed">Draw this seed</button></div>`);
   $('#modalBody').onchange = (e) => {
     const k = e.target.dataset.s; if (!k) return;
-    s.settings[k] = e.target.checked;
-    if (k === 'dark') { document.documentElement.dataset.mode = s.settings.dark ? 'dark' : 'light'; world.setTheme(s.settings.dark); }
-    save();
+    S[k] = e.target.checked; save();
+    if (k === 'dark') { document.documentElement.dataset.mode = S.dark ? 'dark' : 'light'; world.setTheme(S.dark); }
   };
-  $('#modalBody').onclick = async (e) => {
-    const x = e.target.closest('[data-x]'); if (!x) return;
-    const msg = $('#saveMsg');
-    if (x.dataset.x === 'copy') { try { await navigator.clipboard.writeText($('#saveText').value); msg.textContent = 'Copied.'; } catch { $('#saveText').select(); msg.textContent = 'Select the text and copy it with Ctrl+C.'; } }
-    if (x.dataset.x === 'load') {
-      try { const data = JSON.parse(decode($('#saveText').value)); localStorage.setItem(KEY, JSON.stringify({ ...data, savedAt: Date.now() })); location.reload(); }
-      catch { msg.textContent = 'That save code could not be read.'; }
-    }
-    if (x.dataset.x === 'reset') {
-      if (!armed) { armed = true; x.textContent = 'Click again to erase everything'; x.classList.add('primary'); return; }
-      localStorage.removeItem(KEY); stopSaving = true; location.reload();
-    }
+  $('#modalBody').onclick = (e) => {
+    if (!e.target.closest('[data-x="seed"]')) return;
+    const v = parseInt($('#seedIn').value, 10);
+    if (!Number.isFinite(v) || v < 1) { toast('A seed is a whole number above 0.'); return; }
+    closeModal(); build(v); toast(`Drew ${city.name}.`);
   };
 };
-if (away && away.earned > 0) {
-  UI.modal(UI.awayHtml(away));
-  $('#modalBody').onclick = (e) => { if (e.target.closest('[data-x="ok"]')) UI.closeModal(); };
+
+/* ---------- compass and scale bar ---------- */
+function updateMeta() {
+  $('#needle').setAttribute('transform', `rotate(${cam.yaw * 180 / Math.PI})`);
+  // how many pixels one metre covers at the point the camera looks at
+  const t = cam.target, a = world.project(t.x, 0, t.z), r = world.camera.matrixWorld;
+  const right = { x: r.elements[0], z: r.elements[2] }, L = 20;
+  const b = world.project(t.x + right.x * L, 0, t.z + right.z * L);
+  const pxPerM = Math.hypot(b.x - a.x, b.y - a.y) / (L * METRES);
+  const nice = [10, 20, 50, 100, 200, 500, 1000];
+  const len = nice.find(n => n * pxPerM >= 70) || 1000;
+  $('#scalebar .bar').style.width = `${Math.round(len * pxPerM)}px`;
+  $('#scaleTxt').textContent = len >= 1000 ? `${len / 1000} km` : `${len} m`;
 }
 
-/* ---------- loops ---------- */
-let last = performance.now(), stopSaving = false;
-setInterval(() => { // simulation keeps going in background tabs; catches up if the browser throttled us
-  const now = performance.now(); let dt = (now - last) / 1000; last = now;
-  dt = Math.min(dt, AWAY_CAP);
-  if (dt > 5) S.fastForward(s, dt); else S.step(s, dt);
-}, 200);
-setInterval(() => { if (!stopSaving) save(); }, 15000);
-addEventListener('visibilitychange', () => { if (document.hidden && !stopSaving) save(); });
-addEventListener('beforeunload', () => { if (!stopSaving) save(); });
+/* ---------- start ---------- */
+build(seed, false);
+cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560); cam.dist = 560; cam.update(0); updateMeta();
+$('#boot').remove();
 
-setInterval(() => {
-  UI.renderHud(s); UI.renderDock(s, mode, pick); UI.renderPanel(s, sel, act);
-  UI.renderTutorial(s, save); tags.rebuild();
-  if (sel && !S.byId(s, sel)) sel = null;
-}, 250);
-UI.renderHud(s); UI.renderTutorial(s, save);
-
-let prev = performance.now();
+let prev = performance.now(), metaT = 0;
 function frame(now) {
   const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
   cam.update(dt);
-  world.frame(dt, now / 1000, sel, hover, s.settings.calm);
-  tags.place(now / 1000);
+  world.frame(dt, now / 1000, cam, S.calm);
+  placeTags();
+  if ((metaT += dt) > 0.15) { metaT = 0; updateMeta(); }
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);

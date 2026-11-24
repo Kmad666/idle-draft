@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Idle Draft</title>
+<title>Idle Draft · Cityscape</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
@@ -19,24 +19,39 @@
 <div id="tags"></div>
 
 <header class="hud glass">
-  <div class="brand"><b>Idle Draft</b><small>v0.1 · Sheet NW-01</small></div>
-  <div class="money"><span class="lbl">Bits</span><b id="bits">0</b><small id="rate">+0 / s</small></div>
+  <div class="brand"><b>Idle Draft</b><small>v0.2 · Sheet NW-02 · Cityscape</small></div>
+  <div class="money"><span class="lbl">City</span><b id="cityName">…</b><small id="cityStats"></small></div>
   <div class="hud-btns">
-    <button class="btn" id="btnPulse" title="Pulse: doubles speed for 10 seconds">Pulse</button>
-    <button class="btn" id="btnGuide">Glossary</button>
+    <button class="btn primary" id="btnNew" title="Draw a new city from a random seed">New city</button>
+    <button class="btn" id="btnOverview" title="Fly back out to see the whole city">Overview</button>
     <button class="btn" id="btnControls">Controls</button>
     <button class="btn" id="btnSettings">Settings</button>
   </div>
 </header>
 
-<section id="tutorial" class="glass card"></section>
 <aside id="panel" class="glass card" hidden></aside>
-<div id="modeBar" class="glass" hidden></div>
-<nav id="dock" class="glass" aria-label="Build"></nav>
-<div id="tooltip" hidden></div>
+
+<div id="compass" class="glass" title="North arrow">
+  <svg viewBox="-20 -20 40 40" width="40" height="40" aria-hidden="true"><g id="needle"><path d="M0 -15 L5 4 L0 1 L-5 4 Z" fill="currentColor"/><path d="M0 15 L5 4 L0 1 L-5 4 Z" fill="none" stroke="currentColor" stroke-width="1"/></g></svg>
+  <span>N</span>
+</div>
+<div id="scalebar" class="glass"><div class="bar"><i></i><i></i></div><span id="scaleTxt">100 m</span></div>
+
+<aside id="titleBlock" class="glass card" aria-label="Title block">
+  <div class="tb-head"><span>Project</span><b>Idle Draft</b></div>
+  <div class="tb-row"><span>Drawing</span><b>Cityscape, general arrangement</b></div>
+  <div class="tb-row"><span>City</span><b id="tbCity">…</b></div>
+  <div class="tb-grid">
+    <div><span>Sheet</span><b>NW-02</b></div>
+    <div><span>Seed</span><b id="tbSeed">…</b></div>
+    <div><span>Buildings</span><b id="tbCount">…</b></div>
+    <div><span>Tallest</span><b id="tbTall">…</b></div>
+  </div>
+</aside>
+
 <div id="toasts" aria-live="polite"></div>
 <div id="modal" hidden><div class="sheet glass card" role="dialog" aria-modal="true"><button class="x btn" id="modalClose" aria-label="Close">Close</button><div id="modalBody"></div></div></div>
-<div id="boot">Loading the drafting table…</div>
+<div id="boot">Drafting the city…</div>
 
 <script type="module" src="js/main.js"></script>
 </body>
