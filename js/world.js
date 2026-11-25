@@ -19,6 +19,7 @@ const THEMES = {
   neon: { void: 0x07050f, fog: 0x1b0c2e, grid: 0x6a2a8a, grid2: 0x241036, ink: 0x35d8ff, inkOp: 0.16, accent: 0xff3dbb,
     sun: 0.4, hemi: 0.4, exposure: 1.0, env: 0.15 },
 };
+const CHUNK = 4 * PITCH; // tile size for culling: 4×4 blocks, 16 tiles
 const NEON = [[1, 0.17, 0.84], [0.17, 0.95, 1], [1, 0.69, 0.17], [0.49, 1, 0.35]]; // magenta, cyan, amber, lime
 
 // Lit windows drawn in the shader from world position, so no textures or extra geometry are needed.
@@ -115,7 +116,7 @@ export class World {
 
     this.hemi = new THREE.HemisphereLight(0xffffff, 0x9aa8ba, 0.55);
     this.sun = new THREE.DirectionalLight(0xffffff, 1.4);
-    this.sun.castShadow = true; const ms = Math.min(4096, this.renderer.capabilities.maxTextureSize); this.sun.shadow.mapSize.set(ms, ms);
+    this.sun.castShadow = true; this.sun.shadow.mapSize.set(2048, 2048); // the shadow box shrinks as you zoom in, so this stays sharp up close
     this.sun.shadow.bias = -0.0005; this.sun.shadow.normalBias = 0.04;
     this.scene.add(this.hemi, this.sun, this.sun.target);
 
@@ -143,13 +144,12 @@ export class World {
       deck: new THREE.MeshStandardMaterial({ color: 0x1b2131, metalness: 0.5, roughness: 0.4 }),
       train: new THREE.MeshBasicMaterial({ color: new THREE.Color(1.1, 1.7, 2.2) }),
     };
-    this.signMats = { solid: [], strip: [], board: [] };
-    for (let c = 0; c < NEON_COLOURS; c++) {
-      const [r, g, b] = NEON[c], hot = new THREE.Color(r * 1.7, g * 1.7, b * 1.7);
-      this.signMats.solid.push(new THREE.MeshBasicMaterial({ color: hot, side: THREE.DoubleSide }));
-      for (const k of ['strip', 'board']) this.signMats[k].push(new THREE.MeshBasicMaterial({ map: glyphTexture(NEON[c], k === 'strip', 99 + c * 7 + (k === 'strip' ? 0 : 3)),
-        color: new THREE.Color(1.2, 1.2, 1.2), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }));
-    }
+    // One material per sign kind; each sign carries its colour in its vertices, so a tile needs 3 draw calls, not 12.
+    this.signMats = {
+      solid: new THREE.MeshBasicMaterial({ color: new THREE.Color(1.7, 1.7, 1.7), vertexColors: true, side: THREE.DoubleSide }),
+      strip: new THREE.MeshBasicMaterial({ map: glyphTexture([1, 1, 1], true, 99), vertexColors: true, color: new THREE.Color(1.2, 1.2, 1.2), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+      board: new THREE.MeshBasicMaterial({ map: glyphTexture([1, 1, 1], false, 102), vertexColors: true, color: new THREE.Color(1.2, 1.2, 1.2), side: THREE.DoubleSide, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }),
+    };
     this.glowMat = new THREE.LineBasicMaterial({ color: new THREE.Color(0.4, 2.2, 2.8), transparent: true, opacity: 0.9 });
     this.glowMat2 = new THREE.LineBasicMaterial({ color: new THREE.Color(2.6, 0.4, 2.0), transparent: true, opacity: 0.9 });
     this.edgeMat = new THREE.LineBasicMaterial({ transparent: true, opacity: 0.3 });
@@ -205,6 +205,8 @@ export class World {
     this.scene.add(this.grid);
   }
 
+  setPixelRatio(pr) { this.renderer.setPixelRatio(pr); this.resize(); }
+
   resize() {
     const w = this.el.clientWidth, h = this.el.clientHeight;
     this.renderer.setSize(w, h, false); this.camera.aspect = w / Math.max(1, h); this.camera.updateProjectionMatrix();
@@ -218,7 +220,18 @@ export class World {
     this.cityGroup.clear();
     this.spinners = []; this.cyber = null;
     const M = city.cyber ? this.neonMats : this.draftMats; this.mats = M;
-    const geos = {}, edges = [], floors = [], marks = [];
+    // The city is cut into tiles of 4×4 blocks. Each tile is its own set of meshes, so the renderer
+    // can skip tiles that are off screen or past the fog, and the shadow pass only draws nearby ones.
+    const chunks = new Map();
+    let geos, edges, floors, marks;
+    const at = (x, z) => {
+      const key = x === null ? 'all' : Math.floor((x + HALF) / CHUNK) + ',' + Math.floor((z + HALF) / CHUNK);
+      let c = chunks.get(key);
+      if (!c) chunks.set(key, c = { geos: {}, edges: [], floors: [], marks: [] });
+      ({ geos, edges, floors, marks } = c);
+    };
+    at(null, null);
+    this.at = at; this.chunkOf = (x, z) => Math.floor((x + HALF) / CHUNK) + ',' + Math.floor((z + HALF) / CHUNK);
     const put = (m, g) => (geos[m] || (geos[m] = [])).push(prep(g));
     const seg = (arr, a, b) => arr.push(a[0], a[1], a[2], b[0], b[1], b[2]);
     const boxEdges = (arr, x0, y0, z0, x1, y1, z1) => {
@@ -245,11 +258,11 @@ export class World {
 
     const rz0 = blockRect(0, RIVER_ROW).z0 - 1, rz1 = rz0 + BLOCK + 2;
     this.river = { z0: rz0, z1: rz1 };
-    const kerbGeos = [], parkGeos = [];
     for (const b of city.blocks) {
       if (b.kind === 'river') continue;
+      at(b.cx, b.cz);
       const g = new THREE.BoxGeometry(BLOCK, KERB, BLOCK); g.translate(b.cx, KERB / 2, b.cz);
-      (b.kind === 'park' ? parkGeos : kerbGeos).push(prep(g));
+      put(b.kind === 'park' ? 'park' : 'kerb', g);
       boxEdges(edges, b.x0, 0, b.z0, b.x1, KERB, b.z1);
       if (b.kind === 'park') { // paths as a thin cross
         seg(marks, [b.cx, KERB + 0.02, b.z0 + 1], [b.cx, KERB + 0.02, b.z1 - 1]);
@@ -258,11 +271,11 @@ export class World {
       if (b.kind === 'civic') { circle(marks, b.cx, KERB + 0.02, b.cz, 13.2, 48); loop(marks, b.x0 + 1, b.z0 + 1, b.x1 - 1, b.z1 - 1, KERB + 0.02); }
     }
     for (const p of city.ponds) {
+      at(p.x, p.z);
       const g = new THREE.CylinderGeometry(p.r, p.r, 0.1, 40); g.translate(p.x, KERB + 0.06, p.z);
       put('water', g); circle(edges, p.x, KERB + 0.12, p.z, p.r, 40);
     }
-    put('kerb', kerbGeos.length ? mergeGeometries(kerbGeos) : new THREE.BufferGeometry());
-    if (parkGeos.length) put('park', mergeGeometries(parkGeos));
+    at(null, null);
 
     // river: water band with 45° hatching, the drafting sign for water
     const W = E - 0.5;
@@ -272,11 +285,12 @@ export class World {
       let x0 = c, z0 = rz0, x1 = c + (rz1 - rz0), z1 = rz1;
       if (x0 < -W) { z0 += -W - x0; x0 = -W; }
       if (x1 > W) { z1 -= x1 - W; x1 = W; }
-      if (x1 > x0) seg(marks, [x0, 0.14, z0], [x1, 0.14, z1]);
+      if (x1 > x0) { at((x0 + x1) / 2, (z0 + z1) / 2); seg(marks, [x0, 0.14, z0], [x1, 0.14, z1]); }
     }
     // bridges carry the north-south roads over the river
     for (let k = 0; k <= N; k++) {
       const x = roadLine(k), g = new THREE.BoxGeometry(ROAD + 1.2, 0.6, rz1 - rz0 + 2);
+      at(x, (rz0 + rz1) / 2);
       g.translate(x, 0.3, (rz0 + rz1) / 2); put('kerb', g);
       boxEdges(edges, x - ROAD / 2 - 0.6, 0, rz0 - 1, x + ROAD / 2 + 0.6, 0.6, rz1 + 1);
       for (const s of [-1, 1]) {
@@ -292,17 +306,18 @@ export class World {
         const inX = ((s + HALF) % PITCH);
         if (inX < ROAD / 2 + 1 || inX > PITCH - ROAD / 2 - 1) continue; // keep junctions clear
         const zOnBridge = s + 1 > rz0 - 1 && s < rz1 + 1;
-        seg(marks, [c, zOnBridge ? 0.62 : 0.02, s], [c, zOnBridge ? 0.62 : 0.02, s + 2]);
-        seg(marks, [s, 0.02, c], [s + 2, 0.02, c]);
+        at(c, s); seg(marks, [c, zOnBridge ? 0.62 : 0.02, s], [c, zOnBridge ? 0.62 : 0.02, s + 2]);
+        at(s, c); seg(marks, [s, 0.02, c], [s + 2, 0.02, c]);
       }
     }
 
     /* buildings */
     for (const bd of city.buildings) {
+      at((bd.box.x0 + bd.box.x1) / 2, (bd.box.z0 + bd.box.z1) / 2);
       for (const p of bd.parts) {
         if (p.s === 'box') {
           const big = p.w > 2.5 && p.d > 2.5 && p.h > 1.2;
-          const g = big ? new RoundedBoxGeometry(p.w, p.h, p.d, 2, 0.14) : new THREE.BoxGeometry(p.w, p.h, p.d);
+          const g = big ? new RoundedBoxGeometry(p.w, p.h, p.d, 1, 0.14) : new THREE.BoxGeometry(p.w, p.h, p.d);
           g.translate(p.x, p.y + p.h / 2, p.z); put(p.m, g);
           const x0 = p.x - p.w / 2, x1 = p.x + p.w / 2, z0 = p.z - p.d / 2, z1 = p.z + p.d / 2;
           boxEdges(edges, x0, p.y, z0, x1, p.y + p.h, z1);
@@ -331,27 +346,35 @@ export class World {
         }
       }
     }
-    for (const m in geos) {
-      const mesh = new THREE.Mesh(mergeGeometries(geos[m]), this.mats[m]);
-      mesh.castShadow = !['kerb', 'park', 'water'].includes(m); mesh.receiveShadow = true;
-      this.cityGroup.add(mesh);
-    }
     const lines = (arr, mat) => {
+      if (!arr.length) return;
       const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3));
-      const l = new THREE.LineSegments(g, mat); l.frustumCulled = false; this.cityGroup.add(l);
+      this.cityGroup.add(new THREE.LineSegments(g, mat));
     };
-    lines(edges, this.edgeMat); lines(floors, this.floorMat); lines(marks, this.markMat);
+    for (const c of chunks.values()) {
+      for (const m in c.geos) {
+        const mesh = new THREE.Mesh(mergeGeometries(c.geos[m]), this.mats[m]);
+        mesh.castShadow = !['kerb', 'park', 'water'].includes(m); mesh.receiveShadow = true;
+        this.cityGroup.add(mesh);
+      }
+      lines(c.edges, this.edgeMat); lines(c.floors, this.floorMat); lines(c.marks, this.markMat);
+    }
+    this.chunkCount = chunks.size;
 
     /* trees */
-    const T = city.trees.length;
-    const crowns = new THREE.InstancedMesh(new THREE.SphereGeometry(1, 16, 10), this.mats.tree, T);
-    const trunks = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.14, 0.2, 1, 6), this.mats.trunk, T);
-    city.trees.forEach((t, i) => {
-      this.tmpM.makeScale(t.s * 1.3, t.s * 1.3, t.s * 1.3).setPosition(t.x, KERB + t.s * 2.6, t.z); crowns.setMatrixAt(i, this.tmpM);
-      this.tmpM.makeScale(t.s, t.s * 1.6, t.s).setPosition(t.x, KERB + t.s * 0.8, t.z); trunks.setMatrixAt(i, this.tmpM);
-    });
-    crowns.castShadow = trunks.castShadow = true; crowns.receiveShadow = true;
-    this.cityGroup.add(crowns, trunks);
+    const crownGeo = new THREE.SphereGeometry(1, 12, 8), trunkGeo = new THREE.CylinderGeometry(0.14, 0.2, 1, 6);
+    const byChunk = new Map();
+    for (const t of city.trees) { const k = this.chunkOf(t.x, t.z); (byChunk.get(k) || byChunk.set(k, []).get(k)).push(t); }
+    for (const list of byChunk.values()) {
+      const crowns = new THREE.InstancedMesh(crownGeo, this.mats.tree, list.length), trunks = new THREE.InstancedMesh(trunkGeo, this.mats.trunk, list.length);
+      list.forEach((t, i) => {
+        this.tmpM.makeScale(t.s * 1.3, t.s * 1.3, t.s * 1.3).setPosition(t.x, KERB + t.s * 2.6, t.z); crowns.setMatrixAt(i, this.tmpM);
+        this.tmpM.makeScale(t.s, t.s * 1.6, t.s).setPosition(t.x, KERB + t.s * 0.8, t.z); trunks.setMatrixAt(i, this.tmpM);
+      });
+      crowns.computeBoundingSphere(); trunks.computeBoundingSphere();
+      crowns.castShadow = trunks.castShadow = true; crowns.receiveShadow = true;
+      this.cityGroup.add(crowns, trunks);
+    }
 
     /* traffic: cars keep to the right, each lane at its own steady speed */
     const r = rng(city.seed ^ 0x9e3779b9);
@@ -360,7 +383,7 @@ export class World {
       const n = 6 + Math.floor(r() * 7), speed = 7 + r() * 6, off = r() * 2 * HALF;
       for (let c = 0; c < n; c++) this.cars.push({ ax, line: roadLine(k), dir, speed, s: ((c / n) * 2 * HALF + off + r() * 6) % (2 * HALF) - HALF });
     }
-    const carGeo = new RoundedBoxGeometry(1.6, 0.7, 0.85, 2, 0.25); carGeo.translate(0, 0.35, 0);
+    const carGeo = new RoundedBoxGeometry(1.6, 0.7, 0.85, 1, 0.25); carGeo.translate(0, 0.35, 0);
     this.carMesh = new THREE.InstancedMesh(carGeo, this.mats.car, this.cars.length);
     this.carMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage); this.carMesh.castShadow = true; this.carMesh.frustumCulled = false;
     const palette = [0xffffff, 0xffffff, 0xffffff, 0xf2f5f9, 0xd4500f, 0x8fb8e6, 0xc9d2dd];
@@ -381,42 +404,47 @@ export class World {
   /* ---------- the neon layer ---------- */
   buildCyber(city, M, r, seg) {
     const cy = this.cyber = {};
-    const glow = [], glow2 = [], solid = {};
+    const glows = new Map(); // glowing lines, per tile like everything else
+    const G = (x, z) => { const k = this.chunkOf(x, z); let g = glows.get(k); if (!g) glows.set(k, g = { glow: [], glow2: [] }); return g; };
     const add = (mesh) => { this.cityGroup.add(mesh); return mesh; };
-    const lineMesh = (arr, mat) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); const l = new THREE.LineSegments(g, mat); l.frustumCulled = false; return add(l); };
+    const lineMesh = (arr, mat) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); return add(new THREE.LineSegments(g, mat)); };
 
     // signs: each colour and kind merged into one mesh
     const groups = {};
     for (const sg of city.signs) {
-      const key = (sg.holo ? sg.kind : 'solid') + ':' + sg.c;
+      const key = (sg.holo ? sg.kind : 'solid') + ':' + this.chunkOf(sg.x, sg.z);
       const g = new THREE.PlaneGeometry(sg.w, sg.h); g.rotateY(sg.rot); g.translate(sg.x, sg.y, sg.z);
+      const [cr, cg, cb] = NEON[sg.c], n = g.attributes.position.count;
+      g.setAttribute('color', new THREE.Float32BufferAttribute(new Array(n).fill(0).flatMap(() => [cr, cg, cb]), 3));
       (groups[key] || (groups[key] = [])).push(g);
     }
     for (const key in groups) {
-      const [kind, c] = key.split(':');
-      add(new THREE.Mesh(mergeGeometries(groups[key]), this.signMats[kind][+c]));
+      add(new THREE.Mesh(mergeGeometries(groups[key]), this.signMats[key.split(':')[0]]));
     }
 
     // skybridges and pipes, with a glowing strip under each bridge
-    const beamGeos = { white: [], steel: [] };
+    const beamGeos = {};
     for (const b of city.beams) {
       const dx = b.b[0] - b.a[0], dz = b.b[2] - b.a[2], len = Math.hypot(dx, dz);
       const g = new THREE.BoxGeometry(len, b.h, b.w); g.rotateY(-Math.atan2(dz, dx));
       g.translate((b.a[0] + b.b[0]) / 2, b.a[1] + b.h / 2, (b.a[2] + b.b[2]) / 2);
-      beamGeos[b.m].push(prep(g));
+      const bk = b.m + '|' + this.chunkOf((b.a[0] + b.b[0]) / 2, (b.a[2] + b.b[2]) / 2);
+      (beamGeos[bk] || (beamGeos[bk] = [])).push(prep(g));
+      const { glow, glow2 } = G((b.a[0] + b.b[0]) / 2, (b.a[2] + b.b[2]) / 2);
       if (b.glow) {
         const nx = -dz / len * b.w / 2, nz = dx / len * b.w / 2;
         for (const sgn of [-1, 1]) seg(r() < 0.7 ? glow : glow2, [b.a[0] + nx * sgn, b.a[1] - 0.05, b.a[2] + nz * sgn], [b.b[0] + nx * sgn, b.a[1] - 0.05, b.b[2] + nz * sgn]);
       }
     }
-    for (const m in beamGeos) if (beamGeos[m].length) { const mesh = add(new THREE.Mesh(mergeGeometries(beamGeos[m]), M[m])); mesh.castShadow = true; }
+    for (const k in beamGeos) { const mesh = add(new THREE.Mesh(mergeGeometries(beamGeos[k]), M[k.split('|')[0]])); mesh.castShadow = true; }
 
     // walkway decks over the streets
-    const deckGeos = [];
+    const deckGeos = {};
     for (const d of city.decks) {
       const len = d.s1 - d.s0, mid = (d.s0 + d.s1) / 2;
+      const dk = d.ax === 'x' ? this.chunkOf(d.line, mid) : this.chunkOf(mid, d.line), { glow, glow2 } = d.ax === 'x' ? G(d.line, mid) : G(mid, d.line);
       const g = d.ax === 'x' ? new THREE.BoxGeometry(d.w, 0.7, len) : new THREE.BoxGeometry(len, 0.7, d.w);
-      g.translate(d.ax === 'x' ? d.line : mid, d.y, d.ax === 'x' ? mid : d.line); deckGeos.push(prep(g));
+      g.translate(d.ax === 'x' ? d.line : mid, d.y, d.ax === 'x' ? mid : d.line); (deckGeos[dk] || (deckGeos[dk] = [])).push(prep(g));
       for (const sgn of [-1, 1]) {
         const o = d.line + sgn * d.w / 2, y = d.y + 0.4;
         if (d.ax === 'x') seg(glow, [o, y, d.s0], [o, y, d.s1]); else seg(glow, [d.s0, y, o], [d.s1, y, o]);
@@ -424,7 +452,7 @@ export class World {
         if (d.ax === 'x') seg(glow2, [o, ry, d.s0], [o, ry, d.s1]); else seg(glow2, [d.s0, ry, o], [d.s1, ry, o]);
       }
     }
-    if (deckGeos.length) { const mesh = add(new THREE.Mesh(mergeGeometries(deckGeos), M.deck)); mesh.castShadow = true; mesh.receiveShadow = true; }
+    for (const k in deckGeos) { const mesh = add(new THREE.Mesh(mergeGeometries(deckGeos[k]), M.deck)); mesh.castShadow = true; mesh.receiveShadow = true; }
 
     // elevated rail loop: deck, pillars, glowing edges, and two trains
     const rail = city.rail, pts = rail.pts, railGeos = [];
@@ -437,7 +465,7 @@ export class World {
         const pg = new THREE.CylinderGeometry(0.9, 1.2, rail.y - 1, 12); pg.translate(x, (rail.y - 1) / 2, z); railGeos.push(prep(pg));
       }
       const nx = -dz / len * 1.5, nz = dx / len * 1.5;
-      for (const sgn of [-1, 1]) seg(glow, [a[0] + nx * sgn, rail.y + 0.02, a[1] + nz * sgn], [b[0] + nx * sgn, rail.y + 0.02, b[1] + nz * sgn]);
+      for (const sgn of [-1, 1]) seg(G((a[0] + b[0]) / 2, (a[1] + b[1]) / 2).glow, [a[0] + nx * sgn, rail.y + 0.02, a[1] + nz * sgn], [b[0] + nx * sgn, rail.y + 0.02, b[1] + nz * sgn]);
       cy.railSegs.push({ a, dx: dx / len, dz: dz / len, len, at: cy.railLen }); cy.railLen += len;
     }
     const railMesh = add(new THREE.Mesh(mergeGeometries(railGeos), M.deck)); railMesh.castShadow = true;
@@ -446,7 +474,7 @@ export class World {
     cy.trainMesh = add(new THREE.InstancedMesh(new RoundedBoxGeometry(5.2, 1.7, 2.2, 2, 0.4), M.train, cy.trains.length * carsPer));
     cy.trainMesh.frustumCulled = false; cy.carsPer = carsPer;
 
-    lineMesh(glow, this.glowMat); lineMesh(glow2, this.glowMat2);
+    for (const g of glows.values()) { if (g.glow.length) lineMesh(g.glow, this.glowMat); if (g.glow2.length) lineMesh(g.glow2, this.glowMat2); }
 
     // flying traffic: lanes above the streets at two heights
     cy.fly = [];
@@ -521,8 +549,12 @@ export class World {
     this.sun.position.set(tg.x + 120, 220, tg.z + 90); this.sun.target.position.copy(tg);
     const sc = this.sun.shadow.camera;
     if (sc.right !== ext) { Object.assign(sc, { left: -ext, right: ext, top: ext, bottom: -ext, near: 10, far: 800 }); sc.updateProjectionMatrix(); }
-    if (this.scene.fog.isFogExp2) this.scene.fog.density = 0.42 / (cam.dist + 90);
-    else { this.scene.fog.near = cam.dist * 1.5; this.scene.fog.far = cam.dist * 4.5 + 200; }
+    let far;
+    if (this.scene.fog.isFogExp2) { this.scene.fog.density = 0.42 / (cam.dist + 90); far = 5.2 * (cam.dist + 90); }
+    else { this.scene.fog.near = cam.dist * 1.5; this.scene.fog.far = cam.dist * 4.5 + 200; far = this.scene.fog.far + 20; }
+    // nothing past the fog can be seen, so stop drawing there
+    far = Math.min(2400, far);
+    if (Math.abs(this.camera.far - far) > far * 0.04) { this.camera.far = far; this.camera.updateProjectionMatrix(); }
 
     if (this.carMesh) {
       this.carMesh.visible = !calm;
@@ -554,11 +586,11 @@ export class World {
     const cy = this.cyber, M = this.mats;
     M.white.userData.u.uTime.value = t; M.glass.userData.u.uTime.value = t;
     // signs scroll, and now and then one flickers
-    for (const k of ['strip', 'board']) this.signMats[k].forEach((m, i) => {
-      if (!calm) { if (k === 'strip') m.map.offset.y = (m.map.offset.y + dt * (0.04 + i * 0.012)) % 1; else m.map.offset.x = (m.map.offset.x + dt * (0.03 + i * 0.01)) % 1; }
-      const f = Math.sin(t * 23 + i * 7) > 0.97 ? 0.35 : 1; m.color.setScalar(1.2 * f);
-    });
-    this.signMats.solid.forEach((m, i) => { const [r, g, b] = NEON[i], f = (Math.sin(t * 17 + i * 3) > 0.985 ? 0.3 : 1) * 1.7; m.color.setRGB(r * f, g * f, b * f); });
+    const S = this.signMats;
+    if (!calm) { S.strip.map.offset.y = (S.strip.map.offset.y + dt * 0.05) % 1; S.board.map.offset.x = (S.board.map.offset.x + dt * 0.04) % 1; }
+    S.strip.color.setScalar(Math.sin(t * 23) > 0.97 ? 0.45 : 1.2);
+    S.board.color.setScalar(Math.sin(t * 19 + 2) > 0.97 ? 0.45 : 1.2);
+    S.solid.color.setScalar(Math.sin(t * 17 + 4) > 0.985 ? 0.5 : 1.7);
     cy.flyMesh.visible = cy.trainMesh.visible = cy.rain.visible = !calm;
     for (const s of cy.lights) s.pivot.rotation.y = s.l.phase + t * s.l.speed;
     if (calm) return;

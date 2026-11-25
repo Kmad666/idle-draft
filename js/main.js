@@ -9,7 +9,7 @@ const esc = (v) => String(v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt
 const m = (u) => Math.round(u * METRES);
 
 /* ---------- settings ---------- */
-let prefs = { settings: { theme: 'draft', edgeScroll: false, calm: false, labels: true }, seed: null, delivered: 0 };
+let prefs = { settings: { theme: 'draft', edgeScroll: false, calm: false, labels: true, autoRes: true }, seed: null, delivered: 0 };
 try { const raw = localStorage.getItem(KEY); if (raw) { const p = JSON.parse(raw); prefs = { ...prefs, ...p, settings: { ...prefs.settings, ...p.settings } }; } } catch { /* storage off */ }
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(prefs)); } catch { /* storage off */ } };
 const S = prefs.settings;
@@ -210,7 +210,7 @@ $('#btnSettings').onclick = () => {
     <div class="sub">Style</div>
     ${ORDER.map(k => `<label class="opt"><input type="radio" name="style" data-style="${k}" ${S.theme === k ? 'checked' : ''}>${STYLES[k].label}: ${{ draft: 'white drafting sheet', night: 'the drafting sheet at night, floor lines lit like windows', neon: 'a taller, denser cyberpunk city with signs, skybridges, flying traffic and rain' }[k]}</label>`).join('')}
     <div class="sub" style="margin-top:16px">View</div>
-    ${[['labels', 'Show district names'], ['calm', 'Calm mode: pause the traffic, drones and rain'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
+    ${[['autoRes', 'Auto resolution: render at a lower resolution when the frame rate drops'], ['labels', 'Show district names'], ['calm', 'Calm mode: pause the traffic, drones and rain'], ['edgeScroll', 'Pan when the mouse touches the screen edge']]
       .map(([k, l]) => `<label class="opt"><input type="checkbox" data-s="${k}" ${S[k] ? 'checked' : ''}>${l}</label>`).join('')}
     <div class="sub" style="margin-top:16px">Seed</div>
     <p class="muted" style="font-size:14px">Every city comes from a number. The same number always draws the same city, and the link in your address bar includes it, so you can share it.</p>
@@ -219,6 +219,7 @@ $('#btnSettings').onclick = () => {
     if (e.target.dataset.style) { setStyle(e.target.dataset.style); return; }
     const k = e.target.dataset.s; if (!k) return;
     S[k] = e.target.checked; save();
+    if (k === 'autoRes' && !S.autoRes) { res.pr = res.max; world.setPixelRatio(res.pr); }
   };
   $('#modalBody').onclick = (e) => {
     if (!e.target.closest('[data-x="seed"]')) return;
@@ -247,9 +248,21 @@ build(seed, false);
 cam.focus(city.C.x * 0.5, city.C.z * 0.5 + 40, 560); cam.dist = 560; cam.update(0); updateMeta();
 $('#boot').remove();
 
+/* ---------- auto resolution: keep the frame rate up on slower machines ---------- */
+const res = { max: Math.min(devicePixelRatio, 1.5), pr: Math.min(devicePixelRatio, 1.5), frames: 0, time: 0, calm: 0 };
+function adaptResolution(rawDt) {
+  if (!S.autoRes || document.hidden || rawDt > 0.25) return;
+  res.frames++; res.time += rawDt;
+  if (res.time < 2) return;
+  const fps = res.frames / res.time; res.frames = 0; res.time = 0;
+  if (fps < 42 && res.pr > 0.6) { res.pr = Math.max(0.6, res.pr - 0.15); res.calm = 0; world.setPixelRatio(res.pr); }
+  else if (fps > 57 && res.pr < res.max && ++res.calm >= 3) { res.pr = Math.min(res.max, res.pr + 0.1); res.calm = 0; world.setPixelRatio(res.pr); }
+}
+
 let prev = performance.now(), metaT = 0;
 function frame(now) {
-  const dt = Math.min(0.1, (now - prev) / 1000); prev = now;
+  const rawDt = (now - prev) / 1000, dt = Math.min(0.1, rawDt); prev = now;
+  adaptResolution(rawDt);
   if (follow) { // the camera glides after the drone
     const k = Math.min(1, dt * 4), p = follow.pos;
     cam.target.x += (p.x - cam.target.x) * k; cam.target.z += (p.z - cam.target.z) * k; cam.target.y += (p.y * 0.85 - cam.target.y) * k;

@@ -26,6 +26,12 @@ Three rooftop drone depots (DP-001 to DP-003) each run 12 quadcopters. A drone l
 - The panel shows where it is going, distance left, altitude and its trip count.
 - The top bar counts every delivery, saved in this browser.
 
+## Performance
+
+- The city is split into 16 tiles of 4×4 blocks. Tiles off screen, past the fog, or outside the shadow area are skipped, so a close-up (like following a drone) draws about a fifth of the city.
+- Nothing is drawn beyond the fog line.
+- Auto resolution (on by default, in Settings) lowers the render resolution when the frame rate drops below about 42 fps and raises it again when there is headroom.
+
 ## Version 0.2 contents
 
 - A 16 × 16 block city, about 2,900 buildings, split into districts: Civic Core (towers and a domed rotunda), Midtown, the Terraces (row houses), River Works (sheds, tanks and chimneys) and parks.
